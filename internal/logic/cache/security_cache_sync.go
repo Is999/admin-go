@@ -176,7 +176,7 @@ func (w *SecurityCacheSyncWorker) runOnce(ctx context.Context) error {
 	if appID == "" {
 		return errors.Errorf("安全缓存失效补偿 app_id 为空")
 	}
-	err := redsync.WithLock(ctx, w.svc.Rds, keys.SecurityCacheSyncLockRedisKey(), securityCacheSyncLockTTL, func(lockCtx context.Context) error {
+	err := redsync.WithLockOnce(ctx, w.svc.Rds, keys.SecurityCacheSyncLockRedisKey(), securityCacheSyncLockTTL, func(lockCtx context.Context) error {
 		snapshot, err := w.barrierSnapshot(lockCtx)
 		if err != nil {
 			return errors.Tag(err)

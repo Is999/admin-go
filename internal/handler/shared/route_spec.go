@@ -6,6 +6,7 @@ import (
 	"admin/internal/middleware"
 	"admin/internal/svc"
 
+	"github.com/Is999/go-utils/errors"
 	"github.com/zeromicro/go-zero/rest"
 )
 
@@ -57,36 +58,64 @@ func (s RouteSpec) Describe() string {
 	return s.Description
 }
 
-// RestRoute 将路由规格转换为 go-zero 路由。
-func (s RouteSpec) RestRoute(svcCtx *svc.ServiceContext, authMw *middleware.AuthMiddleware, opsMw *middleware.OpsMiddleware) rest.Route {
+// RestRoute 将路由规格转换为 go-zero 路由；规格错误返回启动错误，禁止用 panic 终止进程。
+func (s RouteSpec) RestRoute(svcCtx *svc.ServiceContext, authMw *middleware.AuthMiddleware, opsMw *middleware.OpsMiddleware) (rest.Route, error) {
 	if s.Handler == nil {
-		panic("路由规格缺少 Handler: " + s.Method + " " + s.Path)
+		return rest.Route{}, errors.Errorf("路由规格缺少 Handler: %s %s", s.Method, s.Path)
+	}
+	if svcCtx == nil {
+		return rest.Route{}, errors.Errorf("路由规格缺少 ServiceContext: %s %s", s.Method, s.Path)
 	}
 	handler := s.Handler(svcCtx)
+	if handler == nil {
+		return rest.Route{}, errors.Errorf("路由规格构造出空 Handler: %s %s", s.Method, s.Path)
+	}
 	alias := s.RouteAlias()
 	switch s.Access {
 	case RouteAccessAuth:
+		if authMw == nil {
+			return rest.Route{}, errors.Errorf("登录态路由缺少 AuthMiddleware: %s %s", s.Method, s.Path)
+		}
 		handler = authMw.Handle(handler, alias)
 	case RouteAccessPublic:
 		if alias != "" {
+			if authMw == nil {
+				return rest.Route{}, errors.Errorf("公开安全路由缺少 AuthMiddleware: %s %s", s.Method, s.Path)
+			}
 			handler = authMw.PublicHandle(handler, alias)
 		}
 	case RouteAccessInternal:
+		if opsMw == nil {
+			return rest.Route{}, errors.Errorf("内网路由缺少 OpsMiddleware: %s %s", s.Method, s.Path)
+		}
 		handler = opsMw.Handle(handler, alias)
 	case RouteAccessDocs:
 		handler = middleware.DocsJwtMiddleware(svcCtx)(handler)
+	case RouteAccessHealth:
+		// 健康探针由部署网络边界控制，不进入登录态或业务签名链。
+	default:
+		// 未知访问类型必须拒绝启动，避免拼写错误把受保护路由降级为匿名公网入口。
+		return rest.Route{}, errors.Errorf("未知路由访问类型: %s", s.Access)
 	}
 	if s.SkipAccessLog {
 		handler = middleware.SkipAccessLog(handler)
 	}
-	return rest.Route{Method: s.Method, Path: s.Path, Handler: handler}
+	return rest.Route{Method: s.Method, Path: s.Path, Handler: handler}, nil
 }
 
-// AddRouteSpecs 按声明顺序注册一组路由规格。
-func AddRouteSpecs(server *rest.Server, svcCtx *svc.ServiceContext, authMw *middleware.AuthMiddleware, opsMw *middleware.OpsMiddleware, specs []RouteSpec) {
+// AddRouteSpecs 按声明顺序转换并注册一组路由规格；任一规格无效时整组不写入 Server。
+func AddRouteSpecs(server *rest.Server, svcCtx *svc.ServiceContext, authMw *middleware.AuthMiddleware, opsMw *middleware.OpsMiddleware, specs []RouteSpec) error {
+	if server == nil {
+		return errors.Errorf("注册路由规格时 HTTP Server 为空")
+	}
 	routes := make([]rest.Route, 0, len(specs))
 	for _, spec := range specs {
-		routes = append(routes, spec.RestRoute(svcCtx, authMw, opsMw))
+		route, err := spec.RestRoute(svcCtx, authMw, opsMw)
+		if err != nil {
+			return errors.Tag(err)
+		}
+		routes = append(routes, route)
 	}
 	server.AddRoutes(routes)
+	return nil
 }

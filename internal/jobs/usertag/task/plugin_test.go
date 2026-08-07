@@ -8,6 +8,7 @@ import (
 
 	keys "admin/common/rediskeys"
 	"admin/internal/config"
+	redislock "admin/internal/infra/redsync"
 	"admin/internal/jobs/usertag/types"
 	"admin/internal/svc"
 	"admin/internal/task/queue"
@@ -107,5 +108,56 @@ func TestUserTagEventOutboxRetryScanOptionsScansAllShards(t *testing.T) {
 	}
 	if !opts.EventHookEnabled || opts.BatchSize != 50 {
 		t.Fatalf("unexpected retry scan options: %+v", opts)
+	}
+}
+
+// TestPeriodicMaintenanceTasksSkipHeldLock 校验重复周期触发只抢锁一次并成功跳过，不进入任务 retry/dead。
+func TestPeriodicMaintenanceTasksSkipHeldLock(t *testing.T) {
+	// cases 覆盖运行期清理和异常 outbox 扫描两个独立入口，锁竞争时都不应访问数据库。
+	cases := []struct {
+		name   string                                           // 周期任务场景
+		key    string                                           // 当前任务的低基数互斥 Key
+		config config.Config                                    // 决定任务是否进入锁竞争的运行配置
+		run    func(context.Context, *svc.ServiceContext) error // 被测周期任务入口
+	}{
+		{
+			name:   "runtime cleanup",
+			key:    keys.UserTagRuntimeCleanupRedisKey(),
+			config: config.Config{AppID: "215"},
+			run:    runUserTagRuntimeCleanupTask,
+		},
+		{
+			name: "event outbox retry scan",
+			key:  keys.UserTagEventOutboxRetryScanRedisKey(),
+			config: config.Config{
+				AppID: "215",
+				Workflows: config.WorkflowsConfig{UserTag: config.UserTagConfig{
+					EventHookEnabled: true,
+				}},
+			},
+			run: runUserTagEventOutboxRetryScanTask,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			server := miniredis.RunT(t)
+			client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+			t.Cleanup(func() { _ = client.Close() })
+			service := svc.NewServiceContext(tt.config, svc.Dependencies{Rds: client})
+
+			holder := redislock.NewLock(client, tt.key)
+			if err := holder.TryLock(context.Background(), time.Minute); err != nil {
+				t.Fatalf("holder.TryLock() error = %v", err)
+			}
+			t.Cleanup(func() { _ = holder.Unlock() })
+
+			startedAt := time.Now()
+			if err := tt.run(context.Background(), service); err != nil {
+				t.Fatalf("periodic task lock contention error = %v, want successful skip", err)
+			}
+			if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+				t.Fatalf("periodic task lock contention elapsed = %v, want no retry backoff", elapsed)
+			}
+		})
 	}
 }

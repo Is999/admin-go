@@ -122,11 +122,6 @@ func TaskWorkflowUniqueKey(name string, key string) string {
 	return TaskQueueRedisKey(joinKeyParts(taskWorkflowSegment, taskWorkflowUniqueSegment, name, key))
 }
 
-// TaskWorkflowUniqueLockKey 返回工作流幂等预占短锁 Redis key。
-func TaskWorkflowUniqueLockKey(name string, key string) string {
-	return TaskQueueRedisKey(joinKeyParts(taskWorkflowSegment, taskWorkflowUniqueLockSegment, name, key))
-}
-
 // TaskAsynqPendingKey 返回 Asynq pending list Redis key。
 func TaskAsynqPendingKey(queue string) string {
 	return taskAsynqKey(queue, taskAsynqStatePending)

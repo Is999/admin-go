@@ -107,9 +107,6 @@ const (
 	// taskWorkflowUniqueSegment 表示工作流幂等占位 key 段。
 	// Redis 类型：Key 片段，TTL 过期规则：不直接写入 Redis，由工作流幂等 key TTL 控制。
 	taskWorkflowUniqueSegment = "unique"
-	// taskWorkflowUniqueLockSegment 表示工作流幂等预占短锁 key 段。
-	// Redis 类型：Key 片段，TTL 过期规则：不直接写入 Redis，由工作流幂等预占短锁 TTL 控制。
-	taskWorkflowUniqueLockSegment = "unique-lock"
 )
 
 // 用户标签工作流 Redis key 片段集中维护。

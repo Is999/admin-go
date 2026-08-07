@@ -16,7 +16,6 @@ import (
 	"admin/helper"
 	"admin/internal/config"
 	"admin/internal/infra/loggerx"
-	redislock "admin/internal/infra/redsync"
 	"admin/internal/requestctx"
 	"admin/internal/svc"
 	tasklimits "admin/internal/task/limits"
@@ -715,19 +714,27 @@ func (m *Manager) EnqueueWorkflowTrigger(ctx context.Context, req *types.Trigger
 	}
 	uniqueReserved := false
 	if uniqueKey != "" && uniqueTTL > 0 {
-		if err := redislock.WithLock(ctx, m.redis, m.workflowUniqueLockKey(workflowName, uniqueKey), m.workflowUniqueLockTTL(), func(lockCtx context.Context) error {
-			locked, reserveErr := m.reserveWorkflowUnique(lockCtx, workflowName, uniqueKey, workflowID, uniqueReservationTTL)
-			if reserveErr != nil {
-				return errors.Wrapf(reserveErr, "预占工作流唯一键失败 workflow=%s unique_key=%s workflow_id=%s", workflowName, uniqueKey, workflowID)
-			}
-			if !locked {
-				return ErrWorkflowAlreadyExists
-			}
-			uniqueReserved = true
-			return nil
-		}); err != nil {
-			return nil, errors.Tag(err)
+		// SETNX 在唯一键本身完成原子预占；外层互斥锁不会增强唯一性，无竞争时也会额外执行加锁和解锁，竞争时还会引入锁重试与等待。
+		reserved, reserveErr := m.reserveWorkflowUnique(ctx, workflowName, uniqueKey, workflowID, uniqueReservationTTL)
+		if reserveErr != nil {
+			return nil, errors.Wrapf(reserveErr, "预占工作流唯一键失败 workflow=%s unique_key=%s workflow_id=%s", workflowName, uniqueKey, workflowID)
 		}
+		if !reserved {
+			return nil, ErrWorkflowAlreadyExists
+		}
+		uniqueReserved = true
+	}
+	// releaseUniqueOnFailure 在入口任务未成功入队时按 owner 释放预占；清理保留请求值但不继承已取消信号，并由 5 秒上限防止 Redis 故障时无期阻塞返回。
+	releaseUniqueOnFailure := func(cause error) error {
+		if !uniqueReserved {
+			return errors.Tag(cause)
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), taskFinalWriteTimeout)
+		defer cancel()
+		if cleanupErr := m.releaseWorkflowUniqueReservation(cleanupCtx, workflowName, uniqueKey, workflowID); cleanupErr != nil {
+			return errors.Join(cause, errors.Wrapf(cleanupErr, "释放工作流触发唯一键预占失败 workflow=%s unique_key=%s workflow_id=%s", workflowName, uniqueKey, workflowID))
+		}
+		return errors.Tag(cause)
 	}
 
 	// 构造 workflow:trigger payload（补齐触发人、重试/超时覆盖等）。
@@ -759,16 +766,10 @@ func (m *Manager) EnqueueWorkflowTrigger(ctx context.Context, req *types.Trigger
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		if uniqueReserved {
-			_ = m.releaseWorkflowUniqueReservation(ctx, workflowName, uniqueKey, workflowID)
-		}
-		return nil, errors.Tag(err)
+		return nil, releaseUniqueOnFailure(err)
 	}
 	if len(body) > tasklimits.MaxPayloadBytes {
-		if uniqueReserved {
-			_ = m.releaseWorkflowUniqueReservation(ctx, workflowName, uniqueKey, workflowID)
-		}
-		return nil, errors.Errorf("工作流触发负载超过上限 bytes=%d max=%d", len(body), tasklimits.MaxPayloadBytes)
+		return nil, releaseUniqueOnFailure(errors.Errorf("工作流触发负载超过上限 bytes=%d max=%d", len(body), tasklimits.MaxPayloadBytes))
 	}
 
 	// 组装 Asynq 入队选项（queue/taskID/retry/timeout/processAt/deadline/unique）。
@@ -793,20 +794,14 @@ func (m *Manager) EnqueueWorkflowTrigger(ctx context.Context, req *types.Trigger
 	if req.ProcessAt != "" {
 		t, parseErr := time.Parse(time.RFC3339, req.ProcessAt)
 		if parseErr != nil {
-			if uniqueReserved {
-				_ = m.releaseWorkflowUniqueReservation(ctx, workflowName, uniqueKey, workflowID)
-			}
-			return nil, errors.Wrap(parseErr, "解析 workflow processAt 失败")
+			return nil, releaseUniqueOnFailure(errors.Wrap(parseErr, "解析 workflow processAt 失败"))
 		}
 		opts = append(opts, asynq.ProcessAt(t))
 	}
 	if req.Deadline != "" {
 		t, parseErr := time.Parse(time.RFC3339, req.Deadline)
 		if parseErr != nil {
-			if uniqueReserved {
-				_ = m.releaseWorkflowUniqueReservation(ctx, workflowName, uniqueKey, workflowID)
-			}
-			return nil, errors.Wrap(parseErr, "解析 workflow deadline 失败")
+			return nil, releaseUniqueOnFailure(errors.Wrap(parseErr, "解析 workflow deadline 失败"))
 		}
 		opts = append(opts, asynq.Deadline(t))
 	}
@@ -820,10 +815,7 @@ func (m *Manager) EnqueueWorkflowTrigger(ctx context.Context, req *types.Trigger
 	// 入队并生成回执；失败时释放幂等预占。
 	info, err := m.client.EnqueueContext(ctx, task, opts...)
 	if err != nil {
-		if uniqueReserved {
-			_ = m.releaseWorkflowUniqueReservation(ctx, workflowName, uniqueKey, workflowID)
-		}
-		return nil, errors.Tag(err)
+		return nil, releaseUniqueOnFailure(err)
 	}
 	resp := &types.TaskWorkflowTriggerResp{
 		TaskID:       info.ID,
@@ -981,14 +973,6 @@ func (m *Manager) workflowUniqueKey(name, key string) string {
 		return ""
 	}
 	return keys.TaskWorkflowUniqueKey(name, key)
-}
-
-// workflowUniqueLockKey 返回工作流幂等预占时使用的短锁 Redis key。
-func (m *Manager) workflowUniqueLockKey(name, key string) string {
-	if !m.useRedisNamespace() {
-		return ""
-	}
-	return keys.TaskWorkflowUniqueLockKey(name, key)
 }
 
 // enqueueTaskWithOptions 把统一任务选项转换为 Asynq 投递参数并执行入队。

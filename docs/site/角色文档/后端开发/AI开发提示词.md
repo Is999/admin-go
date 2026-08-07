@@ -12,6 +12,7 @@
 2. 非平凡任务先使用 $standard-development-flow。需求含糊、存在多种解释，或涉及 API、数据、权限、安全、大表、缓存、迁移和补偿时，先使用 $requirement-intent-gate，说明目标、源码证据、执行边界、非目标和待确认点；未经确认不要猜测实现。
 3. 根据实际技术面使用专项 skill：Go 实现用 $go-ai-implementation-guard；简化和重构用 $simple-code-guard；API 契约用 $api-contract-sync；数据库查询用 $go-db-query-performance-guard；配置用 $go-config-runtime-guard；任务并发用 $go-worker-concurrency-guard；路由安全用 $go-security-route-guard；迁移回填用 $go-migration-backfill-runbook。
 4. 禁止用“简洁”“闭环”“同步相关内容”“必要时处理”“验证通过”“生产可用”等概括词替代检查过程。使用这些词时，按 AI 开发规范逐项给出触发条件、检查对象、通过标准、禁止项和证据；无法给出判定条件时，不得据此实现或宣称完成。
+5. 分析 bug、阻塞点和测试失败时，必须分栏输出“正常逻辑缺陷”“极端运行条件”和“验证环境阻塞”。依赖健康时的错误判断属于正常逻辑 bug；生产事件或主动故障注入已经执行到 Redis/MySQL/MQ/DNS/网络故障处理代码时归入极端运行条件，并标明代码处理符合预期或存在无界阻塞、误写数据、资源泄漏、进程退出等韧性缺陷；验证原本要求依赖健康，但本机缺工具、依赖或权限并在到达待测逻辑前失败时归入验证环境阻塞，不得据此判定代码有 bug 或验证通过。每项写明触发条件、证据、期望/实际行为、影响、是否修改代码和后续责任，禁止混合列举或合并计数。
 
 实现时：
 1. 沿真实入口和完整调用链修改，保持现有分层、注册点和外部可观察业务语义；不要提交脚手架、样例、孤立 helper 或只覆盖 happy path 的半成品。
@@ -20,7 +21,7 @@
 4. 清理现有代码和文件时先区分生产已启用、基础能力但当前未启用、确认废弃无用。没有业务调用方只能证明未启用；仍提供稳定扩展契约、已有多实现、外部依赖隔离、共享约定或 CLI/Make/测试/运维入口的基础能力必须保留，并在文档中准确标注启用状态。只有入口、职责和兼容边界均已消失且删除不损失能力时才可删除。
 5. 新增或重构的变量、常量、方法、结构体、字段、map 字段、路由、GORM Model、接口和关键逻辑补中文注释。新增或修改项目自有 YAML 时，每个固定配置字段必须在正上方以相同缩进补中文注释，写明消费组件和用途，并把源码实际存在的枚举/范围/单位、缺省/空值/零值、normalize/getter、reload/restart、敏感信息和跨字段约束写全；父节点概述不能替代子字段。动态 map 重复项只有在父字段已说明 key/value、空值和合并语义时才可省略重复注释；第三方 schema、纯数据清单或生成文件必须逐文件记录排除依据。
 6. Handler 只处理路由、参数、鉴权审计和响应；业务编排进入 Logic，数据访问进入 Model，具体后台任务进入 jobs，运行时基础能力进入 task/infra/bootstrap。
-7. 错误使用 github.com/Is999/go-utils/errors 包装；同一函数内同一个错误值只包装一次。中间层只返回错误，error 级日志仅在 handler、worker、scheduler、启动入口或不可返回错误的兜底协程记录一次。
+7. 请求、消息、任务、热更新或外部依赖失败必须返回受控错误；服务运行路径禁止 `panic`、会 panic 的 `Must*`、`log.Fatal*`、logger `Panic*`、`os.Exit`、`syscall.Exit` 和 `runtime.Goexit`。错误使用 github.com/Is999/go-utils/errors 包装；同一函数内同一个错误值只包装一次。中间层只返回错误，error 级日志仅在 handler、worker、scheduler、启动入口或不可返回错误的兜底协程记录一次。启动组件逐层返回错误并清理资源；只有 `cmd/*` 主入口可在尚未监听，或全部监听器和后台组件已停止且清理完成后返回进程退出码，失败结果必须非零。
 8. MySQL 默认使用 GORM 链式调用，事务内沿用同一个 tx。原生 SQL 仅在 GORM 无法安全表达或会明显损害性能时使用，并说明索引、扫描范围、批量、超时、并发和 DB 压力。
 9. 原生 SQL 与 Redis Lua 分别保存为 *.sql.tmpl 和 .lua，通过 go:embed 加载；执行前剥离文件头说明。高基数 Redis Key 使用集中 helper、索引集合或登记模板，在线接口不执行无界 SCAN/KEYS。
 10. 数据库结构或基线数据变化只修改现有完整初始化 DDL/DML，不新增按需求、日期、工单或版本拆分的迁移 SQL，不向 defaultMigrationSpecs 追加日常版本。存量库增量 DDL/DML、回填、修复和补偿 SQL 只能生成到被忽略的 data/sql-changes/<change-id>/，通过发布工单交给 DBA/运维命令行执行，禁止提交或暂存。

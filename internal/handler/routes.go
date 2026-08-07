@@ -24,6 +24,7 @@ import (
 	"admin/internal/middleware"
 	"admin/internal/svc"
 
+	"github.com/Is999/go-utils/errors"
 	"github.com/zeromicro/go-zero/rest"
 )
 
@@ -161,29 +162,35 @@ func routeSpecsForServer(specs []shared.RouteSpec, internal bool) []shared.Route
 // 2. trace 创建上下文和 span；
 // 3. access log 使用 defer 在请求结束时统一收口；
 // 4. inner recover 最靠近业务 handler，把 panic 转成标准响应后交回上层记录。
-func RegisterPublicHandlers(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) {
+func RegisterPublicHandlers(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) error {
 	moduleGroups := [][]RouteModule{BuiltinRouteModules(), modules}
-	RegisterPublicHandlersWithModules(server, serverCtx, ComposeRouteModules(moduleGroups...)...)
+	return RegisterPublicHandlersWithModules(server, serverCtx, ComposeRouteModules(moduleGroups...)...)
 }
 
 // RegisterInternalHandlers 统一注册内网监听器的全局中间件和各领域路由模块。
-func RegisterInternalHandlers(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) {
+func RegisterInternalHandlers(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) error {
 	moduleGroups := [][]RouteModule{BuiltinRouteModules(), modules}
-	RegisterInternalHandlersWithModules(server, serverCtx, ComposeRouteModules(moduleGroups...)...)
+	return RegisterInternalHandlersWithModules(server, serverCtx, ComposeRouteModules(moduleGroups...)...)
 }
 
 // RegisterPublicHandlersWithModules 按完整模块清单注册公网路由。
-func RegisterPublicHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) {
-	registerHandlersWithModules(server, serverCtx, false, modules...)
+func RegisterPublicHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) error {
+	return registerHandlersWithModules(server, serverCtx, false, modules...)
 }
 
 // RegisterInternalHandlersWithModules 按完整模块清单注册内网路由。
-func RegisterInternalHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) {
-	registerHandlersWithModules(server, serverCtx, true, modules...)
+func RegisterInternalHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceContext, modules ...RouteModule) error {
+	return registerHandlersWithModules(server, serverCtx, true, modules...)
 }
 
 // registerHandlersWithModules 注册公共中间件，并按监听器边界筛选所有模块路由。
-func registerHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceContext, internal bool, modules ...RouteModule) {
+func registerHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceContext, internal bool, modules ...RouteModule) error {
+	if server == nil {
+		return errors.Errorf("注册 HTTP 路由时 Server 为空 internal=%t", internal)
+	}
+	if serverCtx == nil {
+		return errors.Errorf("注册 HTTP 路由时 ServiceContext 为空 internal=%t", internal)
+	}
 	server.Use(middleware.NewRecoverMiddleware().Handle)
 	server.Use(middleware.NewTraceMiddleware(serverCtx).Handle)
 	server.Use(middleware.NewAccessLogMiddleware().Handle)
@@ -198,8 +205,11 @@ func registerHandlersWithModules(server *rest.Server, serverCtx *svc.ServiceCont
 		}
 		routes := routeSpecsWithModule(module.Name(), module.Routes())
 		routes = routeSpecsForServer(routes, internal)
-		shared.AddRouteSpecs(server, serverCtx, authMw, opsMw, routes)
+		if err := shared.AddRouteSpecs(server, serverCtx, authMw, opsMw, routes); err != nil {
+			return errors.Wrapf(err, "注册路由模块失败 module=%s internal=%t", module.Name(), internal)
+		}
 	}
+	return nil
 }
 
 // builtinRouteModuleSpecs 是内置 HTTP 路由模块的单一装配规格。

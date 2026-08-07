@@ -30,8 +30,12 @@ func TestRegisterHandlersRegistersExpectedRoutes(t *testing.T) {
 	defer internalServer.Stop()
 
 	svcCtx := svc.NewServiceContext(config.Config{}, svc.Dependencies{})
-	RegisterPublicHandlers(publicServer, svcCtx)
-	RegisterInternalHandlers(internalServer, svcCtx)
+	if err := RegisterPublicHandlers(publicServer, svcCtx); err != nil {
+		t.Fatalf("注册公网路由失败: %v", err)
+	}
+	if err := RegisterInternalHandlers(internalServer, svcCtx); err != nil {
+		t.Fatalf("注册内网路由失败: %v", err)
+	}
 	publicRoutes := publicServer.Routes()
 	internalRoutes := internalServer.Routes()
 	routes := append(publicRoutes, internalRoutes...)
@@ -270,7 +274,9 @@ func TestRegisterHandlersAppendsRouteModules(t *testing.T) {
 			},
 		}}
 	})
-	RegisterPublicHandlers(server, svc.NewServiceContext(config.Config{}, svc.Dependencies{}), module)
+	if err := RegisterPublicHandlers(server, svc.NewServiceContext(config.Config{}, svc.Dependencies{}), module); err != nil {
+		t.Fatalf("注册扩展路由失败: %v", err)
+	}
 
 	routeSet := make(map[string]struct{}, len(server.Routes()))
 	for _, route := range server.Routes() {
@@ -296,13 +302,41 @@ func TestCustomRouteModuleIsPartitionedByAccess(t *testing.T) {
 		}}
 	})
 	svcCtx := svc.NewServiceContext(config.Config{}, svc.Dependencies{})
-	RegisterPublicHandlersWithModules(publicServer, svcCtx, module)
-	RegisterInternalHandlersWithModules(internalServer, svcCtx, module)
+	if err := RegisterPublicHandlersWithModules(publicServer, svcCtx, module); err != nil {
+		t.Fatalf("注册公网扩展路由失败: %v", err)
+	}
+	if err := RegisterInternalHandlersWithModules(internalServer, svcCtx, module); err != nil {
+		t.Fatalf("注册内网扩展路由失败: %v", err)
+	}
 	if routeExists(publicServer.Routes(), http.MethodPost+" /internal/custom") {
 		t.Fatal("扩展内网路由不能注册到公网监听器")
 	}
 	if !routeExists(internalServer.Routes(), http.MethodPost+" /internal/custom") {
 		t.Fatal("扩展内网路由应注册到内网监听器")
+	}
+}
+
+// TestCustomRouteModuleRejectsUnknownAccess 确保扩展路由访问类型拼写错误时返回启动错误，而不是 panic 或降级为匿名路由。
+func TestCustomRouteModuleRejectsUnknownAccess(t *testing.T) {
+	server := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
+	defer server.Stop()
+	module := NewRouteModuleFunc("custom-invalid-access", func() []shared.RouteSpec {
+		return []shared.RouteSpec{{
+			Method: http.MethodGet,
+			Path:   "/api/custom-invalid-access",
+			Access: shared.RouteAccess("auth-typo"),
+			Handler: func(*svc.ServiceContext) http.HandlerFunc {
+				return func(http.ResponseWriter, *http.Request) {}
+			},
+		}}
+	})
+
+	err := RegisterPublicHandlersWithModules(server, svc.NewServiceContext(config.Config{}, svc.Dependencies{}), module)
+	if err == nil || !strings.Contains(err.Error(), "未知路由访问类型") {
+		t.Fatalf("未知路由访问类型错误 = %v", err)
+	}
+	if routeExists(server.Routes(), http.MethodGet+" /api/custom-invalid-access") {
+		t.Fatal("无效访问类型路由不能写入 HTTP Server")
 	}
 }
 

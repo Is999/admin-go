@@ -22,11 +22,6 @@ const (
 	taskArchivedRetentionDefaultSeconds = 7 * 24 * 60 * 60
 )
 
-// workflowUniqueLockTTL 返回幂等预占互斥锁的超时时间。
-func (m *Manager) workflowUniqueLockTTL() time.Duration {
-	return 15 * time.Second
-}
-
 // workflowManualRerunRetention 返回手工重跑运行态的安全保留时长，保证中断后状态最终可回收。
 func (m *Manager) workflowManualRerunRetention() time.Duration {
 	return max(m.CompletedRetention(), m.ArchivedRetention())

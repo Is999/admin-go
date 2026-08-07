@@ -571,13 +571,77 @@ func validateCheckpointChecks(actual []checkpointCheck) error {
 	return nil
 }
 
-// normalizeCheckClause 去除 MySQL 元数据输出的引号、字符集前缀、括号和空白差异。
+// normalizeCheckClause 去除 MySQL 元数据输出的转义引号、字符集引导符、标识符引号、外层括号和空白差异。
 func normalizeCheckClause(value string) string {
 	value = strings.ToLower(value)
-	for _, old := range []string{"`", "_utf8mb4", "_utf8mb3", "(", ")", " ", "\t", "\r", "\n"} {
+	// CHECK_CLAUSE 会把字符串边界返回为 \'，先还原引号再识别 _utf8mb4/_latin1 等连接字符集引导符。
+	value = strings.ReplaceAll(value, `\'`, `'`)
+	value = stripCheckCharsetIntroducers(value)
+	value = strings.TrimSpace(value)
+	for hasOuterCheckParentheses(value) {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	for _, old := range []string{"`", " ", "\t", "\r", "\n"} {
 		value = strings.ReplaceAll(value, old, "")
 	}
 	return value
+}
+
+// hasOuterCheckParentheses 判断首尾括号是否完整包裹表达式，避免删除函数调用等具有语义的内部括号。
+func hasOuterCheckParentheses(value string) bool {
+	if len(value) < 2 || value[0] != '(' || value[len(value)-1] != ')' {
+		return false
+	}
+	depth := 0
+	inString := false
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '\'':
+			if inString && index+1 < len(value) && value[index+1] == '\'' {
+				index++
+				continue
+			}
+			inString = !inString
+		case '(':
+			if !inString {
+				depth++
+			}
+		case ')':
+			if !inString {
+				depth--
+				if depth == 0 && index != len(value)-1 {
+					return false
+				}
+			}
+		}
+	}
+	return depth == 0 && !inString
+}
+
+// stripCheckCharsetIntroducers 删除紧邻字符串字面量的 MySQL `_charset` 引导符，不改写标识符中的下划线。
+func stripCheckCharsetIntroducers(value string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	for index := 0; index < len(value); {
+		if value[index] == '_' {
+			quoteIndex := index + 1
+			for quoteIndex < len(value) && isCheckCharsetNameByte(value[quoteIndex]) {
+				quoteIndex++
+			}
+			if quoteIndex > index+1 && quoteIndex < len(value) && value[quoteIndex] == '\'' {
+				index = quoteIndex
+				continue
+			}
+		}
+		normalized.WriteByte(value[index])
+		index++
+	}
+	return normalized.String()
+}
+
+// isCheckCharsetNameByte 限定 MySQL 字符集名称允许的 ASCII 字母、数字和下划线。
+func isCheckCharsetNameByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || value == '_'
 }
 
 // runBatches 在一条专用连接上持有表级命名锁，直到当前阶段结束或进程退出。

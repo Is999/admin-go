@@ -1,6 +1,11 @@
 package admin
 
 import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
+
 	"admin/common/codes"
 	i18n "admin/common/i18n"
 	"admin/helper"
@@ -9,10 +14,6 @@ import (
 	filelogic "admin/internal/logic/file"
 	rbaclogic "admin/internal/logic/rbac"
 	securitylogic "admin/internal/logic/security"
-	"net/http"
-	"strings"
-	"time"
-
 	"admin/internal/model"
 	"admin/internal/requestctx"
 	"admin/internal/svc"
@@ -28,6 +29,8 @@ import (
 const (
 	// adminLoginDummyPasswordHash 用于不存在账号的等时 bcrypt 校验，避免通过响应耗时枚举管理员账号。
 	adminLoginDummyPasswordHash = "$2y$10$ory3FZfUy1VExaUHmEkeluYtVtP/4CiCCfeSPfD12T9dbpWqO52Eq"
+	// adminLoginCleanupTimeout 限制数据库提交失败后清理本次 Redis 会话的独立等待时间。
+	adminLoginCleanupTimeout = 3 * time.Second
 )
 
 // AdminLogic 承载管理员登录、会话、账号创建和权限码查询等核心逻辑。
@@ -87,17 +90,6 @@ func (l *AdminLogic) Login(req *types.LoginReq) *types.BizResult {
 	admin.LastLoginTime = time.Now()
 	admin.UpdatedAt = time.Now()
 
-	update := map[string]any{
-		"last_login_time":   admin.LastLoginTime,
-		"last_login_ip":     admin.LastLoginIP,
-		"last_login_ipaddr": admin.LastLoginIPAddr,
-		"updated_at":        admin.UpdatedAt,
-	}
-	if err = model.UpdateAdmin(l.Svc.WriteDB(svc.DatabaseMain), admin.ID, update); err != nil {
-		return types.DBError(i18n.MsgKeyInternalErrorFormat, err,
-			"AdminLogic.Login 账号[%s]更新最后登录信息失败", req.Username).ToBizResult()
-	}
-
 	// 生成 JWT 令牌
 	token, err := l.generateJWT(admin.ID, admin.Name, admin.LastLoginIP)
 	if err != nil {
@@ -107,16 +99,8 @@ func (l *AdminLogic) Login(req *types.LoginReq) *types.BizResult {
 
 	session := buildAdminSession(admin, token)
 
-	// 把用户资料和 token 一并缓存到 Redis，后续鉴权和登录后初始化信息都优先走缓存。
 	cacheLogic := cachelogic.NewCacheLogic(l.Ctx, l.Svc)
-	if err = cacheLogic.SetAdminSession(admin.ID, session); err != nil {
-		if errors.Is(err, cachelogic.ErrRedisUnavailable) {
-			return redisUnavailableBizResult(err, "AdminLogic.Login 账号[%s]缓存用户信息失败", req.Username)
-		}
-		return types.ServerError(i18n.MsgKeyInternalErrorFormat, err,
-			"AdminLogic.Login 账号[%s]缓存用户信息失败", req.Username).ToBizResult()
-	}
-
+	// 先完成依赖 Redis 的资料构造，失败时不得留下可鉴权会话或虚假的数据库登录记录。
 	userInfo, err := securitylogic.NewSecurityLogic(l.Ctx, l.Svc).BuildProfileInfo(admin, token)
 	if err != nil {
 		if errors.Is(err, cachelogic.ErrRedisUnavailable) {
@@ -126,12 +110,42 @@ func (l *AdminLogic) Login(req *types.LoginReq) *types.BizResult {
 			"AdminLogic.Login 账号[%s]构造登录用户上下文失败", req.Username).ToBizResult()
 	}
 
+	// 会话成功写入后再提交最后登录信息；数据库失败时按 token 所有权删除本次会话，不影响并发产生的新会话。
+	if err = cacheLogic.SetAdminSession(admin.ID, session); err != nil {
+		if errors.Is(err, cachelogic.ErrRedisUnavailable) {
+			return redisUnavailableBizResult(err, "AdminLogic.Login 账号[%s]缓存用户信息失败", req.Username)
+		}
+		return types.ServerError(i18n.MsgKeyInternalErrorFormat, err,
+			"AdminLogic.Login 账号[%s]缓存用户信息失败", req.Username).ToBizResult()
+	}
+	update := map[string]any{
+		"last_login_time":   admin.LastLoginTime,
+		"last_login_ip":     admin.LastLoginIP,
+		"last_login_ipaddr": admin.LastLoginIPAddr,
+		"updated_at":        admin.UpdatedAt,
+	}
+	if err = model.UpdateAdmin(l.Svc.WriteDB(svc.DatabaseMain), admin.ID, update); err != nil {
+		if cleanupErr := l.discardCreatedAdminSession(admin.ID, token); cleanupErr != nil {
+			err = errors.Wrapf(err, "更新最后登录信息失败且清理本次会话失败 cleanup_error=%v", cleanupErr)
+		}
+		return types.DBError(i18n.MsgKeyInternalErrorFormat, err,
+			"AdminLogic.Login 账号[%s]更新最后登录信息失败", req.Username).ToBizResult()
+	}
+
 	return types.NewBizResult(codes.Success).
 		SetI18nMessage(i18n.MsgKeySuccess).
 		WithData(&types.ProfileLoginResp{
 			Token: token,
 			User:  userInfo,
 		})
+}
+
+// discardCreatedAdminSession 使用独立上下文按 token 所有权清理失败登录创建的会话。
+func (l *AdminLogic) discardCreatedAdminSession(adminID int, token string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), adminLoginCleanupTimeout)
+	defer cancel()
+	_, err := cachelogic.NewCacheLogic(cleanupCtx, l.Svc).DeleteAdminSessionForLogout(adminID, token)
+	return errors.Tag(err)
 }
 
 // setLastLoginIP 同步更新最后登录 IP 与其归属地；未启用或未命中时清空旧归属地。

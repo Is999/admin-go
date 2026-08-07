@@ -19,26 +19,37 @@ var localeFS embed.FS
 // localeMessageCatalog 表示从 JSON 语言资产加载的单个语种文案。
 type localeMessageCatalog map[string]string
 
-// messageCatalog 在 main 执行前加载编译进二进制的 JSON 语言包，启动后只读。
-// 固定资产缺失或格式损坏表示发布物本身不可用；panic 被限定在包级匿名初始化器，请求、任务和热加载只能调用返回 error 的 helper。
-var messageCatalog = func() map[string]localeMessageCatalog {
+var (
+	// messageCatalog 保存编译进二进制且已解析的 JSON 文案，启动后只读。
+	// messageBundle 保存已注册固定语种的 go-i18n 查询对象，资产错误时仍保持非空以保护错误响应链。
+	// messageCatalogErr 保存资产加载或注册错误，只允许由 ValidateCatalog 交给应用启动链处理。
+	messageCatalog, messageBundle, messageCatalogErr = loadMessageState()
+)
+
+// loadMessageState 加载并注册固定语言资产；失败时保留非空兜底对象并把错误交给启动链返回。
+func loadMessageState() (map[string]localeMessageCatalog, *goi18n.Bundle, error) {
+	fallbackCatalog := make(map[string]localeMessageCatalog, len(supportedLocales))
+	for _, locale := range supportedLocales {
+		fallbackCatalog[locale] = localeMessageCatalog{}
+	}
+	fallbackBundle := goi18n.NewBundle(language.SimplifiedChinese)
 	catalog, err := loadMessageCatalog()
 	if err != nil {
-		panic(err)
+		return fallbackCatalog, fallbackBundle, errors.Tag(err)
 	}
-	return catalog
-}()
-
-// messageBundle 在包级匿名初始化器中注册固定语种文案，注册失败表示内嵌资产或受支持语种常量不一致。
-var messageBundle = func() *goi18n.Bundle {
-	bundle, err := buildMessageBundle(messageCatalog)
+	bundle, err := buildMessageBundle(catalog)
 	if err != nil {
-		panic(err)
+		return catalog, fallbackBundle, errors.Tag(err)
 	}
-	return bundle
-}()
+	return catalog, bundle, nil
+}
 
-// loadMessageCatalog 从不可变的 go:embed JSON 资产加载语言包；资产错误交由包级初始化器决定是否终止启动。
+// ValidateCatalog 在应用创建资源前校验内嵌语言资产，错误由 main 启动链记录并有序退出。
+func ValidateCatalog() error {
+	return errors.Tag(messageCatalogErr)
+}
+
+// loadMessageCatalog 从不可变的 go:embed JSON 资产加载语言包；资产错误由 ValidateCatalog 返回启动链。
 func loadMessageCatalog() (map[string]localeMessageCatalog, error) {
 	catalog := make(map[string]localeMessageCatalog, len(supportedLocales))
 	for _, locale := range supportedLocales {

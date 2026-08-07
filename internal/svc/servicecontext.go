@@ -51,26 +51,27 @@ type SnowflakeLease interface {
 // - SiteDBs: 主库与可选扩展库连接集合
 // - Rds: Redis（频控、计数、最后发言时间等）
 type ServiceContext struct {
-	configValue       atomic.Value          // 当前生效的配置快照，供运行期按原子方式读取
-	reloadValue       atomic.Value          // 配置热加载运行状态快照，供管理接口和日志复用
-	storageValue      atomic.Value          // 文件存储运行时缓存，保存 *StorageRuntime
-	uploadValue       atomic.Value          // 文件上传运行时缓存，保存 *FileTransferRuntime
-	cacheSyncPending  *atomic.Bool          // 是否存在尚未完成的安全缓存失效任务
-	background        *backgroundTasks      // 请求完成后的短后台任务集合，停机时先等待再关闭数据库等资源
-	SiteDBs           SiteDatabases         // 主库与可选扩展库连接集合
-	Kafka             *kafkax.Producer      // Kafka 生产者，未启用时为空
-	Rds               redis.UniversalClient // Redis 客户端（兼容单机/集群）
-	RedisLimiter      *redislimit.Limiter   // Redis 分布式限流器，同 key 跨实例共享、不同 key 相互隔离
-	Audit             *audit.Recorder       // 审计日志记录器
-	IPRegion          *ipregion.Locator     // 本地 IP 归属地查询器
-	SnowflakeLease    SnowflakeLease        // 雪花 node_id Redis 租约
-	TableCacheMetrics tablecache.Metrics    // 表缓存运行指标记录器
-	TrustedProxies    *utils.TrustedProxies // 启动期解析完成的可信反向代理白名单
-	Task              TaskQueue             // 任务系统接口（支持调度、DAG、队列管理）
-	RuntimeAlerter    TaskRuntimeAlerter    // 独立运行告警入口，不依赖任务系统开关
-	ConfigReload      ConfigReloadExecutor  // 配置热加载执行器，供管理接口手动触发重载
-	Collector         *collectorx.Manager   // 通用收集器（Kafka 正常链路与失败账本重试）
-	CDC               CDCConsumer           // CDC 消费器状态接口，未启用时为空
+	configValue       atomic.Value           // 当前生效的配置快照，供运行期按原子方式读取
+	reloadValue       atomic.Value           // 配置热加载运行状态快照，供管理接口和日志复用
+	storageValue      atomic.Value           // 文件存储运行时缓存，保存 *StorageRuntime
+	uploadValue       atomic.Value           // 文件上传运行时缓存，保存 *FileTransferRuntime
+	cacheSyncPending  *atomic.Bool           // 是否存在尚未完成的安全缓存失效任务
+	background        *backgroundTasks       // 请求完成后的短后台任务集合，停机时先等待再关闭数据库等资源
+	SiteDBs           SiteDatabases          // 主库与可选扩展库连接集合
+	Kafka             *kafkax.Producer       // Kafka 生产者，未启用时为空
+	Rds               redis.UniversalClient  // Redis 客户端（兼容单机/集群）
+	RedisLimiter      *redislimit.Limiter    // Redis 分布式限流器，同 key 跨实例共享、不同 key 相互隔离
+	Audit             *audit.Recorder        // 审计日志记录器
+	IPRegion          *ipregion.Locator      // 本地 IP 归属地查询器
+	SnowflakeLease    SnowflakeLease         // 雪花 node_id Redis 租约
+	TableCacheMetrics tablecache.Metrics     // 表缓存运行指标记录器
+	TableCacheStore   *tablecache.RedisStore // 表缓存进程级 Store，复用已确认的 Redis 拓扑，避免请求间重复探测
+	TrustedProxies    *utils.TrustedProxies  // 启动期解析完成的可信反向代理白名单
+	Task              TaskQueue              // 任务系统接口（支持调度、DAG、队列管理）
+	RuntimeAlerter    TaskRuntimeAlerter     // 独立运行告警入口，不依赖任务系统开关
+	ConfigReload      ConfigReloadExecutor   // 配置热加载执行器，供管理接口手动触发重载
+	Collector         *collectorx.Manager    // 通用收集器（Kafka 正常链路与失败账本重试）
+	CDC               CDCConsumer            // CDC 消费器状态接口，未启用时为空
 }
 
 // CDCConsumer 约束 CDC 消费器对业务层暴露的最小能力。
@@ -141,6 +142,9 @@ func NewServiceContext(c config.Config, deps Dependencies) *ServiceContext {
 	if svcCtx.RedisLimiter == nil && deps.Rds != nil {
 		svcCtx.RedisLimiter = redislimit.New(deps.Rds)
 	}
+	if deps.Rds != nil {
+		svcCtx.TableCacheStore = tablecache.NewRedisStore(deps.Rds)
+	}
 	svcCtx.UpdateConfig(c)
 	svcCtx.UpdateHotReloadStatus(HotReloadStatus{LastStatus: "idle"})
 	svcCtx.storageValue.Store(NewStorageRuntime())
@@ -163,6 +167,7 @@ func (s *ServiceContext) ScopedWithContext(ctx context.Context) *ServiceContext 
 		IPRegion:          s.IPRegion,
 		SnowflakeLease:    s.SnowflakeLease,
 		TableCacheMetrics: s.TableCacheMetrics,
+		TableCacheStore:   s.TableCacheStore,
 		TrustedProxies:    s.TrustedProxies,
 		cacheSyncPending:  s.cacheSyncPending,
 		background:        s.background,

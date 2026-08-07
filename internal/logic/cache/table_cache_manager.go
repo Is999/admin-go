@@ -36,8 +36,13 @@ func TableCacheManager(base *corelogic.BaseLogic) (*tablecache.Manager, error) {
 	if keyPrefix == "" {
 		return nil, WrapRedisUnavailable(nil, "表缓存管理器初始化失败：app_id 缓存命名空间未初始化")
 	}
+	store := base.Svc.TableCacheStore
+	if store == nil {
+		// 兼容只手工组装 ServiceContext 的包内测试；生产入口始终由 NewServiceContext 注入进程级 Store。
+		store = tablecache.NewRedisStore(base.Redis())
+	}
 	return tablecache.NewManager(
-		tablecache.NewRedisStore(base.Redis()),
+		store,
 		tableCacheTargets(base),
 		tablecache.WithKeyPrefix(keyPrefix),
 		tablecache.WithEmptyMarker(keys.EmptyValueMarker, corelogic.EmptyCacheTTL()),

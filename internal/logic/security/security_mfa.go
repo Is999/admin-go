@@ -145,8 +145,8 @@ func (l *SecurityLogic) MarkLoginMFACompleted(adminID int) error {
 }
 
 // loginMFAFlagMatches 判断 Redis 中的登录 MFA 完成标记是否覆盖当前登录会话。
-func loginMFAFlagMatches(flag int64, lastLoginTime time.Time) bool {
-	if lastLoginTime.IsZero() {
+func loginMFAFlagMatches(flag int64, lastLoginTime *time.Time) bool {
+	if lastLoginTime == nil || lastLoginTime.IsZero() {
 		return flag > 0
 	}
 	return flag+loginMFAFlagToleranceSeconds >= lastLoginTime.Unix()

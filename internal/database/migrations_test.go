@@ -36,6 +36,14 @@ func TestAdminBaselineLastLoginIPUsesIPv6Length(t *testing.T) {
 	}
 }
 
+// TestAdminBaselineUsesNullForNeverLoggedIn 验证全新空库以 NULL 表示尚未发生的成功登录事件。
+func TestAdminBaselineUsesNullForNeverLoggedIn(t *testing.T) {
+	sql := migrationSQLByAsset(t, "admin.sql")
+	if !strings.Contains(sql, "`last_login_time` datetime NULL DEFAULT NULL COMMENT '最后登录时间，NULL 表示从未登录'") {
+		t.Fatal("admin.sql 的 last_login_time 必须允许 NULL，并以 NULL 表示从未登录")
+	}
+}
+
 // TestArchiveControlBaselineUsesMicrosecondPrecision 确保归档控制表完整保留 MySQL 微秒时间。
 func TestArchiveControlBaselineUsesMicrosecondPrecision(t *testing.T) {
 	tests := []struct {

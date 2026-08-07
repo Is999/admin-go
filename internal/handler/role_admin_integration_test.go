@@ -19,11 +19,19 @@ import (
 	codes "admin/common/codes"
 	keys "admin/common/rediskeys"
 	"admin/internal/bootstrap"
+	"admin/internal/bootstrap/configload"
+	corelogic "admin/internal/logic"
+	cachelogic "admin/internal/logic/cache"
 	secretkeylogic "admin/internal/logic/secretkey"
 	securitylogic "admin/internal/logic/security"
+	"admin/internal/model"
 	"admin/internal/routealias"
 	"admin/internal/security"
 	"admin/internal/svc"
+	"admin/internal/types"
+
+	"github.com/Is999/go-utils/errors"
+	"gorm.io/gorm"
 )
 
 // roleAdminIntegrationResp 表示接口统一业务响应结构，便于集成测试解码 code/message/data。
@@ -87,14 +95,43 @@ type roleAdminIntegrationClient struct {
 	signer       security.Signer // signer 按生产安全策略生成 AES 请求签名
 }
 
-// integrationAppID 表示集成测试使用的应用 ID。
-const integrationAppID = "1"
+const (
+	// integrationAppID 表示集成测试读取 AES 密钥时使用的应用 ID。
+	integrationAppID = "1"
+	// integrationSuperAdminID 表示初始化数据中超级管理员账号的固定 ID。
+	integrationSuperAdminID = 1
+	// integrationSuperAdminName 表示真实登录流程使用的初始化超级管理员账号。
+	integrationSuperAdminName = "super999"
+	// integrationConfigEnv 指向完整且已通过启动校验的配置文件；测试会在加载后覆盖基础服务地址。
+	integrationConfigEnv = "CRON_ADMIN_TEST_CONFIG"
+	// integrationMySQLDSNEnv 指向隔离 MySQL 数据库；测试会创建、修改并删除业务数据。
+	integrationMySQLDSNEnv = "CRON_ADMIN_TEST_MYSQL_DSN"
+	// integrationRedisAddrEnv 指向隔离 Redis 单机地址；测试会创建并清理登录态与业务缓存。
+	integrationRedisAddrEnv = "CRON_ADMIN_TEST_REDIS_ADDR"
+	// integrationRedisPasswordEnv 是隔离 Redis 密码；空值表示测试 Redis 未启用认证。
+	integrationRedisPasswordEnv = "CRON_ADMIN_TEST_REDIS_PASSWORD"
+	// integrationDisposableEnv 必须显式为 1，防止集成测试误连开发或生产基础服务。
+	integrationDisposableEnv = "CRON_ADMIN_TEST_DISPOSABLE"
+)
+
+const (
+	// integrationReplicaWaitTimeout 限制零结果再次查询的等待窗口；单次 HTTP 超时仍由测试客户端控制。
+	integrationReplicaWaitTimeout = 3 * time.Second
+	// integrationReplicaPollInterval 控制从库可见性重试频率，避免短暂复制延迟造成高频查询。
+	integrationReplicaPollInterval = 100 * time.Millisecond
+)
 
 // TestRoleAdminIntegrationFlows 验证登录、角色父子权限收敛、状态切换和管理员角色绑定过滤链路。
 func TestRoleAdminIntegrationFlows(t *testing.T) {
-	configFile := "../../etc/config.yaml"
+	configFile := strings.TrimSpace(os.Getenv(integrationConfigEnv))
+	testPassword := strings.TrimSpace(os.Getenv("CRON_ADMIN_TEST_PASSWORD"))
+	mysqlDSN := strings.TrimSpace(os.Getenv(integrationMySQLDSNEnv))
+	redisAddr := strings.TrimSpace(os.Getenv(integrationRedisAddrEnv))
+	if configFile == "" || testPassword == "" || mysqlDSN == "" || redisAddr == "" || strings.TrimSpace(os.Getenv(integrationDisposableEnv)) != "1" {
+		t.Skipf("未显式启用隔离集成环境；必须同时设置 %s、CRON_ADMIN_TEST_PASSWORD、%s、%s 和 %s=1", integrationConfigEnv, integrationMySQLDSNEnv, integrationRedisAddrEnv, integrationDisposableEnv)
+	}
 	if _, err := os.Stat(configFile); err != nil {
-		t.Skipf("运行时配置不存在，跳过集成测试: %v", err)
+		t.Fatalf("隔离集成测试配置不存在: %v", err)
 	}
 
 	cfg, err := bootstrap.LoadConfig(configFile)
@@ -108,21 +145,39 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	cfg.Task.Enabled = false
 	cfg.HotReload.Enabled = false
 	cfg.Observability.TraceEnabled = false
+	cfg.MySQL.WriteDataSource = mysqlDSN
+	cfg.MySQL.ReadDataSources = nil
+	cfg.SiteMySQL = nil
+	cfg.Redis.Type = "single"
+	cfg.Redis.Addrs = []string{redisAddr}
+	cfg.Redis.AddrMap = nil
+	cfg.Redis.Password = os.Getenv(integrationRedisPasswordEnv)
+	cfg.Redis.DB = 0
+	cfg.Redis.TLS = false
+	cfg.Redis.TLSInsecureSkipVerify = false
+	cfg.Kafka.Enabled = false
+	cfg.Collector.Enabled = false
+	cfg.CDC.Enabled = false
+	cfg.Archive.Enabled = false
+	cfg.Alert.Lark.Enabled = false
+	if err = configload.Validate(cfg); err != nil {
+		t.Fatalf("隔离集成测试覆盖基础服务地址后配置校验失败: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
 	app, err := bootstrap.New(ctx, cfg, bootstrap.ModeAPI)
 	if err != nil {
-		t.Skipf("运行时依赖未就绪，跳过集成测试: %v", err)
+		t.Fatalf("隔离集成环境依赖初始化失败: %v", err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stopCancel()
 		if stopErr := app.Stop(stopCtx); stopErr != nil {
-			t.Fatalf("停止应用失败: %v", stopErr)
+			t.Errorf("停止应用失败: %v", stopErr)
 		}
-	}()
+	})
 
 	startErrCh := make(chan error, 1)
 	go func() {
@@ -132,15 +187,19 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	baseURL := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
 	integrationWaitForServer(t, baseURL, startErrCh)
 
-	testPassword := strings.TrimSpace(os.Getenv("CRON_ADMIN_TEST_PASSWORD"))
-	if testPassword == "" {
-		t.Skip("未设置 CRON_ADMIN_TEST_PASSWORD，跳过需要真实登录口令的集成测试")
-	}
 	client := &roleAdminIntegrationClient{
 		Client: &http.Client{Timeout: 20 * time.Second},
 		signer: integrationNewAESCipher(t, app.ServiceContext),
 	}
-	superToken := integrationLogin(t, client, baseURL, app.ServiceContext, "super999", testPassword)
+	superSnapshot, superLoginMessageCursor := integrationAdminLoginSnapshot(t, app.ServiceContext, integrationSuperAdminID, integrationSuperAdminName)
+	superToken := ""
+	superLoginMessageCount := 0
+	// 在发起登录前登记 Cleanup；即使登录响应解析失败，也会恢复超级管理员的密码和最后登录状态。
+	t.Cleanup(func() {
+		integrationCleanupAdminLogins(t, app.ServiceContext, superSnapshot, superLoginMessageCursor, superLoginMessageCount)
+	})
+	superToken = integrationLogin(t, client, baseURL, app.ServiceContext, integrationSuperAdminName, testPassword)
+	superLoginMessageCount++
 
 	// 先验证登录后初始化和权限码接口可正常返回，确保前端初始化链路可用。
 	afterInfoResp := integrationDo(t, client, http.MethodGet, baseURL+"/api/auth/profile", "auth.profile", superToken, nil)
@@ -149,6 +208,33 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	}
 	if !codes.IsSuccess(afterInfoResp.Code) {
 		t.Fatalf("接口返回失败: method=%s url=%s code=%d message=%s", http.MethodGet, baseURL+"/api/auth/profile", afterInfoResp.Code, afterInfoResp.Message)
+	}
+	var superProfile struct {
+		NeedResetPassword int `json:"needResetPassword"` // NeedResetPassword 为 1 时只允许访问强制改密入口。
+	}
+	if err = json.Unmarshal(afterInfoResp.Data, &superProfile); err != nil {
+		t.Fatalf("解析超级管理员资料失败: %v", err)
+	}
+	if superProfile.NeedResetPassword != 1 {
+		t.Fatalf("隔离初始化库的超级管理员必须处于强制改密状态: got=%d want=1", superProfile.NeedResetPassword)
+	}
+	changedSuperPassword := "PassWord4!"
+	if testPassword == changedSuperPassword {
+		changedSuperPassword = "PassWord5!"
+	}
+	integrationMustDo(t, client, http.MethodPatch, baseURL+"/api/profile/password", "profile.update_password", superToken, map[string]any{
+		"passwordOld":     testPassword,
+		"passwordNew":     changedSuperPassword,
+		"confirmPassword": changedSuperPassword,
+	}, nil)
+	superToken = integrationLogin(t, client, baseURL, app.ServiceContext, integrationSuperAdminName, changedSuperPassword)
+	superLoginMessageCount++
+	var changedSuperProfile struct {
+		NeedResetPassword int `json:"needResetPassword"` // NeedResetPassword 必须在成功改密后清零。
+	}
+	integrationMustDo(t, client, http.MethodGet, baseURL+"/api/auth/profile", "auth.profile", superToken, nil, &changedSuperProfile)
+	if changedSuperProfile.NeedResetPassword != 0 {
+		t.Fatalf("超级管理员成功改密后仍被标记为强制改密: got=%d want=0", changedSuperProfile.NeedResetPassword)
 	}
 	integrationMustDo(t, client, http.MethodGet, baseURL+"/api/auth/codes", "auth.codes", superToken, nil, nil)
 
@@ -168,6 +254,11 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	parentTitle := fmt.Sprintf("自动化父角色-%d", suffix)
 	childTitle := fmt.Sprintf("自动化子角色-%d", suffix)
 	adminUsername := fmt.Sprintf("ar%d", suffix%1_000_000_000)
+	cleanupAdminID := 0
+	// 清理函数按随机业务标识回查精确 ID；创建成功后即使测试中断，也不会遗留角色、管理员或关系数据。
+	t.Cleanup(func() {
+		integrationCleanupRoleAdminData(t, app.ServiceContext, parentTitle, childTitle, adminUsername, cleanupAdminID)
+	})
 
 	integrationMustDo(t, client, http.MethodPost, baseURL+"/api/roles", "role.add", superToken, map[string]any{
 		"title":       parentTitle,
@@ -198,11 +289,13 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	}, nil)
 	parentCheckedPermissionIDs := integrationGetCheckedPermissionIDs(t, client, baseURL, superToken, parentRole.ID)
 	childCheckedPermissionIDs := integrationGetCheckedPermissionIDs(t, client, baseURL, superToken, childRole.ID)
-	if !slices.Equal(parentCheckedPermissionIDs, parentPermissionIDs) {
-		t.Fatalf("父角色初始权限不符合预期: got=%v want=%v", parentCheckedPermissionIDs, parentPermissionIDs)
+	parentExpectedPermissionIDs := integrationPermissionClosureIDs(permissionTree, parentPermissionIDs)
+	childExpectedPermissionIDs := integrationPermissionClosureIDs(permissionTree, childPermissionIDs)
+	if !slices.Equal(parentCheckedPermissionIDs, parentExpectedPermissionIDs) {
+		t.Fatalf("父角色初始权限及祖先闭包不符合预期: got=%v want=%v", parentCheckedPermissionIDs, parentExpectedPermissionIDs)
 	}
-	if !slices.Equal(childCheckedPermissionIDs, childPermissionIDs) {
-		t.Fatalf("子角色初始权限不符合预期: got=%v want=%v", childCheckedPermissionIDs, childPermissionIDs)
+	if !slices.Equal(childCheckedPermissionIDs, childExpectedPermissionIDs) {
+		t.Fatalf("子角色初始权限及祖先闭包不符合预期: got=%v want=%v", childCheckedPermissionIDs, childExpectedPermissionIDs)
 	}
 
 	// 通过专用授权接口移除父角色权限，校验子角色越权权限会被同步清理。
@@ -221,7 +314,7 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	}
 
 	// 创建管理员并同时提交父子角色，后端应自动过滤子角色，仅保留父角色绑定。
-	addUserTwoStep := integrationIssueMFATwoStep(t, app.ServiceContext, 1, securitylogic.MFAScenarioAddUser)
+	addUserTwoStep := integrationIssueMFATwoStep(t, app.ServiceContext, integrationSuperAdminID, securitylogic.MFAScenarioAddUser)
 	integrationMustDo(t, client, http.MethodPost, baseURL+"/api/admins", "admin.add", superToken, map[string]any{
 		"username":     adminUsername,
 		"realName":     "集成测试管理员",
@@ -238,11 +331,24 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	var adminList struct {
 		List []roleAdminIntegrationAdminItem `json:"list"` // List 表示列表数据。
 	}
-	integrationMustDo(t, client, http.MethodGet, fmt.Sprintf("%s/api/admins?username=%s", baseURL, url.QueryEscape(adminUsername)), "admin.list", superToken, nil, &adminList)
-	if len(adminList.List) != 1 {
-		t.Fatalf("按用户名查询管理员失败: got=%d want=1", len(adminList.List))
+	adminListURL := fmt.Sprintf("%s/api/admins?username=%s", baseURL, url.QueryEscape(adminUsername))
+	replicaDeadline := time.Now().Add(integrationReplicaWaitTimeout)
+	for {
+		adminList.List = nil
+		integrationMustDo(t, client, http.MethodGet, adminListURL, "admin.list", superToken, nil, &adminList)
+		if len(adminList.List) == 1 {
+			break
+		}
+		if len(adminList.List) > 1 {
+			t.Fatalf("按唯一用户名查询管理员返回多条记录: got=%d want=1", len(adminList.List))
+		}
+		if time.Now().After(replicaDeadline) {
+			t.Fatalf("新增管理员从库可见性重试窗口 %s 已耗尽: username=%s", integrationReplicaWaitTimeout, adminUsername)
+		}
+		time.Sleep(integrationReplicaPollInterval)
 	}
 	adminID := adminList.List[0].ID
+	cleanupAdminID = adminID
 
 	var adminRoles []roleAdminIntegrationAdminRoleItem
 	integrationMustDo(t, client, http.MethodGet, fmt.Sprintf("%s/api/admins/roles/%d", baseURL, adminID), "admin.role.list", superToken, nil, &adminRoles)
@@ -254,7 +360,7 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	}
 
 	// 覆盖保存管理员角色会对角色数组签名；成功后超级管理员会话必须继续有效。
-	editUserTwoStep := integrationIssueMFATwoStep(t, app.ServiceContext, 1, securitylogic.MFAScenarioEditUser)
+	editUserTwoStep := integrationIssueMFATwoStep(t, app.ServiceContext, integrationSuperAdminID, securitylogic.MFAScenarioEditUser)
 	integrationMustDo(t, client, http.MethodPatch, fmt.Sprintf("%s/api/admins/roles/%d", baseURL, adminID), "admin.role.update", superToken, map[string]any{
 		"roleIDs":      []int{parentRole.ID},
 		"twoStepKey":   editUserTwoStep.Key,
@@ -262,11 +368,24 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 	}, nil)
 	integrationMustDo(t, client, http.MethodGet, baseURL+"/api/auth/codes", "auth.codes", superToken, nil, nil)
 
-	// 最后用新管理员重新登录并验证权限码接口能成功返回，确认前后端初始化链路未被破坏。
+	// 新增管理员首次登录只允许访问强制改密链路，普通业务入口必须返回明确业务码。
 	adminToken := integrationLogin(t, client, baseURL, app.ServiceContext, adminUsername, "PassWord3!")
 	integrationMustDo(t, client, http.MethodGet, baseURL+"/api/auth/profile", "auth.profile", adminToken, nil, nil)
 	integrationMustDo(t, client, http.MethodGet, baseURL+"/api/auth/codes", "auth.codes", adminToken, nil, nil)
-	// 文档会话只承载登录凭证，不要求角色同时拥有两个文档站中的任一入口权限。
+	forcedPasswordResp := integrationDo(t, client, http.MethodPost, baseURL+"/api/docs/session", string(routealias.Ignore), adminToken, nil)
+	if forcedPasswordResp.Code != codes.CheckPasswordReset {
+		t.Fatalf("首次登录访问文档会话未被强制改密拦截: got=%d want=%d message=%s", forcedPasswordResp.Code, codes.CheckPasswordReset, forcedPasswordResp.Message)
+	}
+
+	changedPassword := "PassWord4!"
+	integrationMustDo(t, client, http.MethodPatch, baseURL+"/api/profile/password", "profile.update_password", adminToken, map[string]any{
+		"passwordOld":     "PassWord3!",
+		"passwordNew":     changedPassword,
+		"confirmPassword": changedPassword,
+	}, nil)
+	adminToken = integrationLogin(t, client, baseURL, app.ServiceContext, adminUsername, changedPassword)
+	integrationMustDo(t, client, http.MethodGet, baseURL+"/api/auth/profile", "auth.profile", adminToken, nil, nil)
+	// 改密后文档会话只承载登录凭证，不要求角色同时拥有两个文档站中的任一入口权限。
 	integrationMustDo(t, client, http.MethodPost, baseURL+"/api/docs/session", string(routealias.Ignore), adminToken, nil, nil)
 
 	// 最后再验证禁用角色接口和列表状态回写，避免影响前面的“管理员绑定角色”校验。
@@ -280,10 +399,277 @@ func TestRoleAdminIntegrationFlows(t *testing.T) {
 		t.Fatalf("子角色状态更新失败: got=%d want=0", childRole.Status)
 	}
 
-	// 清理集成测试创建的数据，避免污染后续人工验证。
-	integrationMustDo(t, client, http.MethodDelete, fmt.Sprintf("%s/api/admins/%d", baseURL, adminID), "admin.delete", superToken, nil, nil)
+	// 删除接口本身仍属于真实业务流覆盖；Cleanup 只负责物理清理软删除角色和中断时的残留数据。
+	deleteUserTwoStep := integrationIssueMFATwoStep(t, app.ServiceContext, integrationSuperAdminID, securitylogic.MFAScenarioDeleteUser)
+	integrationMustDo(t, client, http.MethodDelete, fmt.Sprintf("%s/api/admins/%d", baseURL, adminID), "admin.delete", superToken, map[string]any{
+		"twoStepKey":   deleteUserTwoStep.Key,
+		"twoStepValue": deleteUserTwoStep.Value,
+	}, nil)
 	integrationMustDo(t, client, http.MethodDelete, fmt.Sprintf("%s/api/roles/%d", baseURL, childRole.ID), "role.delete", superToken, nil, nil)
 	integrationMustDo(t, client, http.MethodDelete, fmt.Sprintf("%s/api/roles/%d", baseURL, parentRole.ID), "role.delete", superToken, nil, nil)
+
+}
+
+// TestIntegrationPermissionClosureIDs 验证集成断言会保留叶子权限并补齐完整祖先路径。
+func TestIntegrationPermissionClosureIDs(t *testing.T) {
+	tree := []roleAdminIntegrationPermissionItem{{
+		ID: 1,
+		Children: []roleAdminIntegrationPermissionItem{{
+			ID: 2,
+			Children: []roleAdminIntegrationPermissionItem{{
+				ID: 3,
+			}},
+		}, {
+			ID: 4,
+		}},
+	}}
+
+	got := integrationPermissionClosureIDs(tree, []int{3, 4})
+	want := []int{1, 2, 3, 4}
+	if !slices.Equal(got, want) {
+		t.Fatalf("权限祖先闭包不符合预期: got=%v want=%v", got, want)
+	}
+}
+
+// integrationAdminLoginSnapshot 保存超级管理员登录前的持久状态和消息游标，供 Cleanup 精确恢复。
+func integrationAdminLoginSnapshot(t *testing.T, svcCtx *svc.ServiceContext, adminID int, adminName string) (model.Admin, int64) {
+	t.Helper()
+	if svcCtx == nil || svcCtx.WriteDB(svc.DatabaseMain) == nil {
+		t.Fatal("读取管理员登录前快照失败: MySQL 写库未初始化")
+	}
+	writeDB := svcCtx.WriteDB(svc.DatabaseMain)
+	var snapshot model.Admin
+	if err := writeDB.Session(&gorm.Session{}).Where("id = ? AND name = ?", adminID, adminName).Take(&snapshot).Error; err != nil {
+		t.Fatalf("读取管理员登录前快照失败: adminID=%d err=%v", adminID, err)
+	}
+
+	var message model.AdminMessage
+	err := writeDB.Session(&gorm.Session{}).
+		Select("id").
+		Where("sender_admin_id = ? AND sender_admin_name = ? AND type = ?", adminID, adminName, types.AdminMessageTypeAdminLogin).
+		Order("id DESC").
+		Take(&message).Error
+	switch {
+	case err == nil:
+		return snapshot, message.ID
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return snapshot, 0
+	default:
+		t.Fatalf("读取管理员登录消息游标失败: adminID=%d err=%v", adminID, err)
+		return model.Admin{}, 0
+	}
+}
+
+// integrationCleanupAdminLogins 清理本轮登录消息和会话，并恢复超级管理员的密码、强制改密与最后登录字段。
+// 该操作仅允许在 CRON_ADMIN_TEST_DISPOSABLE=1 的隔离环境运行；恢复期间不能存在外部并发登录。
+func integrationCleanupAdminLogins(t *testing.T, svcCtx *svc.ServiceContext, snapshot model.Admin, messageCursor int64, expectedMessageCount int) {
+	t.Helper()
+	if svcCtx == nil || snapshot.ID <= 0 {
+		t.Error("清理管理员登录副作用失败: ServiceContext 为空")
+		return
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	backgroundStopped := true
+	if err := svcCtx.StopBackground(cleanupCtx); err != nil {
+		backgroundStopped = false
+		t.Errorf("等待管理员登录消息写入完成失败: %v", err)
+	}
+
+	if backgroundStopped {
+		integrationDeleteAdminLoginMessages(t, svcCtx.WriteDB(svc.DatabaseMain), snapshot.ID, snapshot.Name, messageCursor, expectedMessageCount)
+	}
+	writeDB := svcCtx.WriteDB(svc.DatabaseMain)
+	if writeDB == nil {
+		t.Error("恢复管理员登录前状态失败: MySQL 写库未初始化")
+		return
+	}
+	updates := map[string]any{
+		"password":            snapshot.Password,
+		"need_reset_password": snapshot.NeedResetPassword,
+		"last_login_time":     snapshot.LastLoginTime,
+		"last_login_ip":       snapshot.LastLoginIP,
+		"last_login_ipaddr":   snapshot.LastLoginIPAddr,
+		"updated_at":          snapshot.UpdatedAt,
+	}
+	result := writeDB.Session(&gorm.Session{}).Model(&model.Admin{}).
+		Where("id = ? AND name = ?", snapshot.ID, snapshot.Name).
+		Updates(updates)
+	if result.Error != nil || result.RowsAffected != 1 {
+		t.Errorf("恢复管理员登录前状态失败: adminID=%d rows=%d err=%v", snapshot.ID, result.RowsAffected, result.Error)
+		return
+	}
+	base := corelogic.NewBaseLogicWithContext(cleanupCtx, svcCtx)
+	if err := cachelogic.InvalidateAdminSecurityCache(base, snapshot.ID); err != nil {
+		t.Errorf("恢复管理员状态后清理登录态与 MFA 缓存失败: adminID=%d err=%v", snapshot.ID, err)
+	}
+}
+
+// integrationDeleteAdminLoginMessages 只删除游标后数量与本轮成功登录次数一致的消息；数量不符时拒绝删除。
+func integrationDeleteAdminLoginMessages(t *testing.T, writeDB *gorm.DB, adminID int, adminName string, messageCursor int64, expectedMessageCount int) {
+	t.Helper()
+	if writeDB == nil {
+		t.Error("清理管理员登录消息失败: MySQL 写库未初始化")
+		return
+	}
+
+	var messageIDs []int64
+	if err := writeDB.Session(&gorm.Session{}).Model(&model.AdminMessage{}).
+		Where("id > ? AND sender_admin_id = ? AND sender_admin_name = ? AND type = ?", messageCursor, adminID, adminName, types.AdminMessageTypeAdminLogin).
+		Order("id ASC").
+		Pluck("id", &messageIDs).Error; err != nil {
+		t.Errorf("查询本轮管理员登录消息失败: adminID=%d err=%v", adminID, err)
+		return
+	}
+	if len(messageIDs) != expectedMessageCount {
+		t.Errorf("本轮管理员登录消息数量不符合已完成登录次数，拒绝删除: adminID=%d cursor=%d candidates=%d expected=%d", adminID, messageCursor, len(messageIDs), expectedMessageCount)
+		return
+	}
+	if len(messageIDs) == 0 {
+		return
+	}
+
+	if err := writeDB.Session(&gorm.Session{}).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("message_id IN ?", messageIDs).Delete(&model.AdminMessageReceiver{}).Error; err != nil {
+			return errors.Wrap(err, "删除管理员登录消息收件关系失败")
+		}
+		result := tx.Where("id IN ? AND sender_admin_id = ? AND sender_admin_name = ? AND type = ?", messageIDs, adminID, adminName, types.AdminMessageTypeAdminLogin).
+			Delete(&model.AdminMessage{})
+		if result.Error != nil {
+			return errors.Wrap(result.Error, "删除管理员登录消息失败")
+		}
+		if result.RowsAffected != int64(expectedMessageCount) {
+			return errors.Errorf("删除管理员登录消息影响行数异常: messageIDs=%v rows=%d expected=%d", messageIDs, result.RowsAffected, expectedMessageCount)
+		}
+		return nil
+	}); err != nil {
+		t.Errorf("清理管理员登录消息失败: adminID=%d messageIDs=%v err=%v", adminID, messageIDs, err)
+	}
+}
+
+// integrationCleanupRoleAdminData 硬删除本轮随机标识对应的管理员、角色和关系，并精确失效相关缓存。
+// 生产删除接口保留角色软删除审计语义；集成测试必须物理移除随机数据，避免重复执行污染真实环境。
+func integrationCleanupRoleAdminData(t *testing.T, svcCtx *svc.ServiceContext, parentTitle, childTitle, adminUsername string, knownAdminID int) {
+	t.Helper()
+	if svcCtx == nil {
+		t.Error("清理角色管理员集成测试数据失败: ServiceContext 为空")
+		return
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Cleanup 也会在 Fatal/Skip 后运行；先阻止新短后台任务并等待已登记任务落库，避免清理后又写回测试消息。
+	if err := svcCtx.StopBackground(cleanupCtx); err != nil {
+		t.Errorf("等待集成测试短后台任务完成失败: %v", err)
+		return
+	}
+	base := corelogic.NewBaseLogicWithContext(cleanupCtx, svcCtx)
+	if base == nil || base.Svc == nil {
+		t.Error("清理角色管理员集成测试数据失败: BaseLogic 未初始化")
+		return
+	}
+	writeDB := base.Svc.WriteDB(svc.DatabaseMain)
+	if writeDB == nil {
+		t.Error("清理角色管理员集成测试数据失败: MySQL 写库未初始化")
+		return
+	}
+
+	var roles []model.AdminRole
+	if err := writeDB.Session(&gorm.Session{}).
+		Where("title IN ?", []string{parentTitle, childTitle}).
+		Find(&roles).Error; err != nil {
+		t.Errorf("查询待清理测试角色失败: %v", err)
+		return
+	}
+	roleIDs := make([]int, 0, len(roles))
+	for _, role := range roles {
+		roleIDs = append(roleIDs, role.ID)
+	}
+	roleIDs = types.UniquePositiveInts(roleIDs)
+
+	var adminRow model.Admin
+	adminID := knownAdminID
+	adminExists := false
+	adminErr := writeDB.Session(&gorm.Session{}).
+		Where("name = ?", adminUsername).
+		Take(&adminRow).Error
+	switch {
+	case adminErr == nil:
+		adminID = adminRow.ID
+		adminExists = true
+	case errors.Is(adminErr, gorm.ErrRecordNotFound):
+	case adminErr != nil:
+		t.Errorf("查询待清理测试管理员失败: %v", adminErr)
+		return
+	}
+
+	err := writeDB.Session(&gorm.Session{}).Transaction(func(tx *gorm.DB) error {
+		if adminID > 0 {
+			var messageIDs []int64
+			if err := tx.Model(&model.AdminMessage{}).
+				Where("sender_admin_id = ? AND type = ?", adminID, types.AdminMessageTypeAdminLogin).
+				Pluck("id", &messageIDs).Error; err != nil {
+				return errors.Wrap(err, "查询测试管理员登录消息失败")
+			}
+			if len(messageIDs) > 0 {
+				if err := tx.Where("message_id IN ?", messageIDs).Delete(&model.AdminMessageReceiver{}).Error; err != nil {
+					return errors.Wrap(err, "删除测试管理员登录消息收件关系失败")
+				}
+				if err := tx.Where("id IN ? AND sender_admin_id = ?", messageIDs, adminID).Delete(&model.AdminMessage{}).Error; err != nil {
+					return errors.Wrap(err, "删除测试管理员登录消息失败")
+				}
+			}
+			if err := tx.Where("user_id = ?", adminID).Delete(&model.AdminRoleRel{}).Error; err != nil {
+				return errors.Wrap(err, "删除测试管理员角色关系失败")
+			}
+			if adminExists {
+				if err := tx.Where("id = ? AND name = ?", adminID, adminUsername).Delete(&model.Admin{}).Error; err != nil {
+					return errors.Wrap(err, "删除测试管理员失败")
+				}
+			}
+		}
+		if len(roleIDs) == 0 {
+			return nil
+		}
+		if err := tx.Where("role_id IN ?", roleIDs).Delete(&model.AdminRoleRel{}).Error; err != nil {
+			return errors.Wrap(err, "删除测试角色管理员关系失败")
+		}
+		if err := tx.Where("role_id IN ?", roleIDs).Delete(&model.AdminRolePermissionRel{}).Error; err != nil {
+			return errors.Wrap(err, "删除测试角色路由权限关系失败")
+		}
+		if err := tx.Where("role_id IN ?", roleIDs).Delete(&model.AdminRoleDocPermissionRel{}).Error; err != nil {
+			return errors.Wrap(err, "删除测试角色文档权限关系失败")
+		}
+		if err := tx.Where("id IN ? AND title IN ?", roleIDs, []string{parentTitle, childTitle}).Delete(&model.AdminRole{}).Error; err != nil {
+			return errors.Wrap(err, "删除测试角色失败")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Errorf("清理角色管理员集成测试数据失败: %v", err)
+		return
+	}
+
+	if adminID > 0 {
+		if err := cachelogic.InvalidateDeletedAdminCache(base, adminID); err != nil {
+			t.Errorf("清理测试管理员缓存失败: %v", err)
+		}
+	}
+	roleCacheKeys := []string{keys.RoleTree, keys.RoleStatus}
+	for _, roleID := range roleIDs {
+		roleCacheKeys = append(roleCacheKeys,
+			fmt.Sprintf(keys.RolePermission, roleID),
+			fmt.Sprintf(keys.RoleDocPermission, roleID),
+		)
+	}
+	if err := cachelogic.DeleteTableCacheKeysExact(
+		base,
+		"integrationCleanupRoleAdminData 清理测试角色缓存",
+		cachelogic.TableCachePhysicalKeys(base, roleCacheKeys...),
+	); err != nil {
+		t.Errorf("清理测试角色缓存失败: %v", err)
+	}
 }
 
 // integrationFreePort 申请一个本地空闲端口，避免和开发中的服务端口冲突。
@@ -711,6 +1097,37 @@ func integrationPickPermissionIDs(t *testing.T, tree []roleAdminIntegrationPermi
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// integrationPermissionClosureIDs 根据权限树补齐已提交权限的祖先 ID，匹配生产授权保存语义。
+func integrationPermissionClosureIDs(tree []roleAdminIntegrationPermissionItem, selectedIDs []int) []int {
+	selected := make(map[int]struct{}, len(selectedIDs))
+	for _, permissionID := range types.UniquePositiveInts(selectedIDs) {
+		selected[permissionID] = struct{}{}
+	}
+	closure := make(map[int]struct{}, len(selected))
+	var walk func(items []roleAdminIntegrationPermissionItem, ancestors []int)
+	walk = func(items []roleAdminIntegrationPermissionItem, ancestors []int) {
+		for _, item := range items {
+			path := append(append([]int(nil), ancestors...), item.ID)
+			if _, ok := selected[item.ID]; ok {
+				for _, permissionID := range path {
+					if permissionID > 0 {
+						closure[permissionID] = struct{}{}
+					}
+				}
+			}
+			walk(item.Children, path)
+		}
+	}
+	walk(tree, nil)
+
+	result := make([]int, 0, len(closure))
+	for permissionID := range closure {
+		result = append(result, permissionID)
+	}
+	slices.Sort(result)
+	return result
 }
 
 // integrationGetCheckedPermissionIDs 读取角色权限树里当前已勾选的权限 ID。

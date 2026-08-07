@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `admin` (
   `status` tinyint NOT NULL DEFAULT '1' COMMENT '账户状态: 1正常, 0禁用',
   `avatar` varchar(255) NOT NULL DEFAULT '' COMMENT '头像',
   `description` varchar(255) NOT NULL DEFAULT '' COMMENT '简介描述',
-  `last_login_time` datetime NOT NULL COMMENT '最后登录时间',
+  `last_login_time` datetime NULL DEFAULT NULL COMMENT '最后登录时间，NULL 表示从未登录',
   `last_login_ip` varchar(45) NOT NULL DEFAULT '' COMMENT '最后登录 IP',
   `last_login_ipaddr` varchar(255) NOT NULL DEFAULT '' COMMENT '最后登录 IP 归属地',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '添加时间',

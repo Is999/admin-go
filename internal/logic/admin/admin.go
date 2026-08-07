@@ -87,7 +87,8 @@ func (l *AdminLogic) Login(req *types.LoginReq) *types.BizResult {
 
 	// 更新最后登录时间、IP 与离线归属地；归属地查询异常不影响登录主流程。
 	l.setLastLoginIP(admin, req.IP)
-	admin.LastLoginTime = time.Now()
+	lastLoginTime := time.Now()
+	admin.LastLoginTime = &lastLoginTime
 	admin.UpdatedAt = time.Now()
 
 	// 生成 JWT 令牌
@@ -265,7 +266,7 @@ func (l *AdminLogic) Create(req *types.AddAdminReq) *types.BizResult {
 		Status:          1,
 		Avatar:          avatar,
 		Description:     req.Description,
-		LastLoginTime:   time.Time{},
+		LastLoginTime:   nil,
 		LastLoginIP:     "",
 		LastLoginIPAddr: "",
 		CreatedAt:       time.Now(),

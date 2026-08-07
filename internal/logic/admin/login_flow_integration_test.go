@@ -54,6 +54,7 @@ func TestLoginRemovesCreatedSessionWhenDatabaseUpdateFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("生成测试密码哈希失败: %v", err)
 	}
+	lastLoginTime := time.Unix(1_700_000_000, 0)
 	admin := &model.Admin{
 		ID:                7,
 		Name:              "login_failure_admin",
@@ -61,7 +62,7 @@ func TestLoginRemovesCreatedSessionWhenDatabaseUpdateFails(t *testing.T) {
 		Password:          string(passwordHash),
 		NeedResetPassword: 0,
 		Status:            1,
-		LastLoginTime:     time.Unix(1_700_000_000, 0),
+		LastLoginTime:     &lastLoginTime,
 		CreatedAt:         time.Unix(1_700_000_000, 0),
 		UpdatedAt:         time.Unix(1_700_000_000, 0),
 	}

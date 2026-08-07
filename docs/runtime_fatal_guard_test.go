@@ -11,12 +11,6 @@ import (
 	"testing"
 )
 
-// allowedInitPanicFiles 只允许发布物固定资产在包级匿名初始化器中校验失败时终止启动。
-// 新增文件例外必须同时证明输入固定且不受请求、消息、任务、热加载或外部依赖影响。
-var allowedInitPanicFiles = map[string]struct{}{
-	"common/i18n/catalog.go": {},
-}
-
 // TestProductionCodeRejectsRuntimeFatalCalls 扫描项目自有生产 Go 文件，阻止运行路径重新引入不可恢复退出。
 func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 	moduleRoot, err := filepath.Abs("..")
@@ -49,7 +43,7 @@ func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 			return err
 		}
 		imports := importPathByAlias(parsed)
-		allowedFatalCalls := packageInitializerFatalCalls(parsed, relPath, imports)
+		allowedMustCalls := packageInitializerMustCalls(parsed, imports)
 		allowedStartupExits := commandMainExitCalls(parsed, relPath, imports)
 		for _, imported := range parsed.Imports {
 			path, pathErr := strconv.Unquote(imported.Path.Value)
@@ -68,13 +62,13 @@ func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 			switch target := call.Fun.(type) {
 			case *ast.Ident:
 				if target.Name == "panic" {
-					if _, allowed := allowedFatalCalls[call.Pos()]; !allowed {
+					if _, allowed := allowedMustCalls[call.Pos()]; !allowed {
 						t.Errorf("运行路径禁止 panic: %s:%d", relPath, position.Line)
 					}
 				}
 			case *ast.SelectorExpr:
 				if isFatalSelector(target) {
-					if _, allowed := allowedFatalCalls[call.Pos()]; !allowed {
+					if _, allowed := allowedMustCalls[call.Pos()]; !allowed {
 						t.Errorf("生产代码禁止不可恢复调用 %s: %s:%d", target.Sel.Name, relPath, position.Line)
 					}
 				}
@@ -93,9 +87,9 @@ func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 	}
 }
 
-// packageInitializerFatalCalls 返回允许在包初始化阶段执行的固定资产校验调用位置。
-func packageInitializerFatalCalls(file *ast.File, relPath string, imports map[string]string) map[token.Pos]struct{} {
-	positions := packageInitializerPanicCalls(file, relPath)
+// packageInitializerMustCalls 只返回包初始化阶段基于固定字面量执行的 Must* 调用位置，不放行 panic。
+func packageInitializerMustCalls(file *ast.File, imports map[string]string) map[token.Pos]struct{} {
+	positions := make(map[token.Pos]struct{})
 	for _, declaration := range file.Decls {
 		group, ok := declaration.(*ast.GenDecl)
 		if !ok || group.Tok != token.VAR {
@@ -125,6 +119,20 @@ func packageInitializerFatalCalls(file *ast.File, relPath string, imports map[st
 		}
 	}
 	return positions
+}
+
+// TestPackageInitializerMustCallsRejectsPanic 确保包级立即执行函数也不能借初始化阶段放行 panic。
+func TestPackageInitializerMustCallsRejectsPanic(t *testing.T) {
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, "common/i18n/catalog.go", `package i18n
+var initialized = func() int { panic("build asset"); return 1 }()
+`, 0)
+	if err != nil {
+		t.Fatalf("解析测试源码失败: %v", err)
+	}
+	if got := len(packageInitializerMustCalls(parsed, importPathByAlias(parsed))); got != 0 {
+		t.Fatalf("包初始化 panic 被错误放行，允许调用数量=%d", got)
+	}
 }
 
 // commandMainExitCalls 只放行 cmd 主函数直接执行的退出候选；仍需沿主调用链确认服务尚未监听或已完整停机并清理资源。
@@ -161,69 +169,7 @@ func commandMainExitCalls(file *ast.File, relPath string, imports map[string]str
 	return positions
 }
 
-// packageInitializerPanicCalls 只返回包级变量直接调用的匿名函数内 panic，命名 helper 和未调用函数值不会被放行。
-func packageInitializerPanicCalls(file *ast.File, relPath string) map[token.Pos]struct{} {
-	positions := make(map[token.Pos]struct{})
-	if _, ok := allowedInitPanicFiles[relPath]; !ok {
-		return positions
-	}
-	for _, declaration := range file.Decls {
-		group, ok := declaration.(*ast.GenDecl)
-		if !ok || group.Tok != token.VAR {
-			continue
-		}
-		for _, spec := range group.Specs {
-			values, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			for _, value := range values.Values {
-				call, ok := value.(*ast.CallExpr)
-				if !ok {
-					continue
-				}
-				function, ok := call.Fun.(*ast.FuncLit)
-				if !ok {
-					continue
-				}
-				ast.Inspect(function.Body, func(node ast.Node) bool {
-					// 初始化器内保存或异步执行的嵌套函数可能在 main 启动后运行，其 panic 不属于包初始化例外。
-					if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
-						return false
-					}
-					panicCall, ok := node.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					if target, ok := panicCall.Fun.(*ast.Ident); ok && target.Name == "panic" {
-						positions[panicCall.Pos()] = struct{}{}
-					}
-					return true
-				})
-			}
-		}
-	}
-	return positions
-}
-
-// TestPackageInitializerPanicCallsRejectsCallableFunctions 校验只放行立即执行的包级匿名初始化器，命名函数和未调用函数值仍属运行期风险。
-func TestPackageInitializerPanicCallsRejectsCallableFunctions(t *testing.T) {
-	fileSet := token.NewFileSet()
-	parsed, err := parser.ParseFile(fileSet, "common/i18n/catalog.go", `package i18n
-var initialized = func() int { panic("build asset"); return 1 }()
-var callable = func() { panic("runtime value") }
-var nested = func() int { deferred := func() { panic("runtime nested") }; _ = deferred; return 1 }()
-func runtimePath() { panic("runtime function") }
-`, 0)
-	if err != nil {
-		t.Fatalf("解析测试源码失败: %v", err)
-	}
-	if got := len(packageInitializerPanicCalls(parsed, "common/i18n/catalog.go")); got != 1 {
-		t.Fatalf("允许的包初始化 panic 数量 = %d，期望 1", got)
-	}
-}
-
-// TestFatalCallClassification 校验固定包初始化例外与运行期终止调用分类不会因标准库别名失效。
+// TestFatalCallClassification 校验固定 Must* 与运行期终止调用分类不会因标准库别名失效。
 func TestFatalCallClassification(t *testing.T) {
 	fileSet := token.NewFileSet()
 	parsed, err := parser.ParseFile(fileSet, "common/i18n/catalog.go", `package i18n
@@ -241,7 +187,7 @@ func runtimePath() { _ = re.MustCompile("runtime"); run.Goexit(); sys.Exit(1) }
 		t.Fatalf("解析测试源码失败: %v", err)
 	}
 	imports := importPathByAlias(parsed)
-	allowed := packageInitializerFatalCalls(parsed, "common/i18n/catalog.go", imports)
+	allowed := packageInitializerMustCalls(parsed, imports)
 	if len(allowed) != 1 {
 		t.Fatalf("允许的固定包初始化调用数量 = %d，期望 1", len(allowed))
 	}

@@ -92,10 +92,12 @@ integration-test: integration-env-up
 		INTEGRATION_REDIS_PASSWORD='$(INTEGRATION_REDIS_PASSWORD)' \
 		go test -count=1 -tags=integration ./internal/infra/redislimit ./internal/task/queue
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/database
+	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/logic/admin
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/audit
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/infra/collectorx
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/jobs/archive
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 ./internal/sharding/migration
+	SHARD_BACKFILL_TEST_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 ./cmd/shardbackfill -run '^TestBackfillResumesAndVerifiesOnMySQL$$'
 
 MIGRATE_CONFIG ?= ./etc/config.yaml
 

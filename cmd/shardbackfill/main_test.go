@@ -205,7 +205,7 @@ func TestValidateCheckpointChecksRejectsWeakening(t *testing.T) {
 	checks := []checkpointCheck{
 		{Name: "chk_shard_backfill_cursor", Clause: "(`cursor_value` BETWEEN `range_start` AND `range_end`)", Enforced: "YES"},
 		{Name: "chk_shard_backfill_range", Clause: "(`range_start` < `range_end`)", Enforced: "YES"},
-		{Name: "chk_shard_backfill_status", Clause: "(`status` IN (_utf8mb4'running',_utf8mb4'backfilled',_utf8mb4'verifying',_utf8mb4'verified',_utf8mb4'mismatch'))", Enforced: "YES"},
+		{Name: "chk_shard_backfill_status", Clause: "(`status` IN (_utf8mb4\\'running\\',_utf8mb4\\'backfilled\\',_utf8mb4\\'verifying\\',_utf8mb4\\'verified\\',_utf8mb4\\'mismatch\\'))", Enforced: "YES"},
 		{Name: "chk_shard_verify_cursor", Clause: "(`verify_cursor` BETWEEN `range_start` AND `range_end`)", Enforced: "YES"},
 	}
 	if err := validateCheckpointChecks(checks); err != nil {
@@ -214,6 +214,25 @@ func TestValidateCheckpointChecksRejectsWeakening(t *testing.T) {
 	checks[2].Clause = "status <> ''"
 	if err := validateCheckpointChecks(checks); err == nil {
 		t.Fatal("validateCheckpointChecks() should reject weakened status constraint")
+	}
+}
+
+// TestNormalizeCheckClauseAcceptsConnectionCharsets 验证连接字符集变化不会把同一条 CHECK 约束误判为结构漂移。
+func TestNormalizeCheckClauseAcceptsConnectionCharsets(t *testing.T) {
+	want := normalizeCheckClause("status IN ('running','backfilled')")
+	for _, clause := range []string{
+		"(`status` IN (_utf8mb4\\'running\\',_utf8mb4\\'backfilled\\'))",
+		"(`status` IN (_latin1\\'running\\',_latin1\\'backfilled\\'))",
+	} {
+		if got := normalizeCheckClause(clause); got != want {
+			t.Fatalf("normalizeCheckClause(%q) = %q, want %q", clause, got, want)
+		}
+	}
+	if got := normalizeCheckClause("`cursor_value` BETWEEN `range_start` AND `range_end`"); got != "cursor_valuebetweenrange_startandrange_end" {
+		t.Fatalf("标识符下划线被错误改写: %q", got)
+	}
+	if got := normalizeCheckClause("status IN ('running')"); got != "statusin('running')" {
+		t.Fatalf("具有语义的函数括号被错误改写: %q", got)
 	}
 }
 

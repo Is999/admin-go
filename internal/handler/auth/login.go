@@ -72,8 +72,10 @@ func LoginHandler(sCtx *svc.ServiceContext) http.HandlerFunc {
 			// 登录成功后把用户信息写回 request meta，保证本次请求的访问日志也能带上 user_id。
 			if loginUser, ok := resp.Data.(*types.ProfileLoginResp); ok && loginUser.User != nil {
 				requestctx.SetUser(r.Context(), loginUser.User.ID, req.Username, req.IP)
-				// 登录成功后异步投递“管理员登录”消息，通知超级管理员与登录本人，便于安全审计与排障回溯。
-				go messagelogic.EmitAdminLoginMessage(r.Context(), sCtx, loginUser.User.ID, req.Username, req.IP)
+				// 登录成功后异步投递“管理员登录”消息；任务纳入 ServiceContext 停机等待，避免数据库先关闭导致消息丢失。
+				sCtx.GoBackground(func() {
+					messagelogic.EmitAdminLoginMessage(r.Context(), sCtx, loginUser.User.ID, req.Username, req.IP)
+				})
 			}
 		}
 		recordAuthAudit(logicObj.Audit(), r.Context(), audit.Event{

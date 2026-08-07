@@ -273,6 +273,10 @@ func (a *App) Stop(ctx context.Context) error {
 	if a.InternalServer != nil {
 		a.InternalServer.Stop()
 	}
+	// HTTP 入口停止后等待请求派生的短后台任务，确保消息写入先于数据库等共享资源关闭。
+	if a.ServiceContext != nil {
+		recordErr(a.ServiceContext.StopBackground(ctx))
+	}
 	// 再停止配置热加载协程，避免资源释放过程中仍有后台线程刷新配置快照。
 	recordErr(a.stopConfigHotReload(ctx))
 	recordErr(a.stopRuntimeConfigWatcher(ctx))

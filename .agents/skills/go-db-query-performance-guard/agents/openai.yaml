@@ -1,4 +1,4 @@
 interface:
   display_name: "Go 数据库查询护栏"
-  short_description: "审查 GORM、SQL、索引和 DB 压力。"
-  default_prompt: "使用 $go-db-query-performance-guard 复核这个数据库查询改动的生产安全性。"
+  short_description: "审查 GORM、原生 SQL、索引、扫描范围、批量上限、并发与数据库压力。"
+  default_prompt: "使用 $go-db-query-performance-guard 核对这个查询的调用频率、索引、扫描与返回上限、批量、超时和并发边界。"

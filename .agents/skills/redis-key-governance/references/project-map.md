@@ -1,29 +1,28 @@
-# 项目地图
+# Redis Key 项目地图
 
-## 发现 Redis Helper 区域
-
-不要假设其它仓库的 helper 包名可用。用当前仓库搜索 helper：
+## 发现 helper 与 registry
 
 ```bash
 rg --files | rg '(^|/)(common/keys|common/rediskeys|data/keys|rediskeys|redis_keys|cachekeys|cache/keys)(/|$)'
+rg -n 'RedisKey|redis key|registry|static_check|SCAN|KEYS|Scan\(|Keys\(' --glob '*.go' --glob '*.lua'
 ```
 
-同时搜索 registry 或 static check：
+不要假设兄弟仓库使用相同包名；从当前调用点追到实际 Redis client、helper、Lua 和测试。
+
+## 审查维度
+
+- Key 模板、数据结构、hash tag、基数和归属服务。
+- TTL、滑动续期、永久 Key、空值占位和过期语义。
+- cache miss、回源锁、重建、失效和降级路径。
+- 多 Key Lua/CAS 的同槽、owner、版本、计数与原子边界。
+- 跨服务共享兼容和发布顺序。
+- `SCAN`/`KEYS`、高基数索引和大结果集风险。
+
+## 常用检查
 
 ```bash
-rg -n 'RedisKey|redis key|registry|static_check|SCAN|KEYS|Scan\\(|Keys\\(' --glob '*.go'
+rg -n "SCAN|Keys\\(|Scan\\(|redis\\.|Redis|fmt\\.Sprintf|:%|:\\*" --glob '*.go' --glob '*.lua'
+python3 <skill-dir>/scripts/redis_key_scan.py <repo>
 ```
 
-## 长期规则
-
-- 除非用户明确要求隔离，共享 cache 必须继续共享。
-- 优先使用 helper function 加 registry/static test，不只做一次性调用点清理。
-- 在线路径避免高基数 wildcard scan。
-- invalidation、TTL、cache miss、rebuild、fallback 要一起审查。
-- SQL/Lua/cache 资产要与 Go embed 和测试保持同步。
-
-## 审查命令
-
-- `rg -n "SCAN|Keys\\(|Scan\\(|redis\\.|Redis|fmt\\.Sprintf|:%|:\\*" --glob '*.go'`
-- `python3 <skill-dir>/scripts/redis_key_scan.py <repo>`
-- 存在 helper registry/static check 时，运行仓库已有相关测试。
+修改 helper/registry 时运行其归属包和所有直接调用包测试；修改共享 Key 模板、hash tag、编码或 TTL 时，分别运行每个消费仓库的契约测试。交付记录必须说明是否需要回填、清缓存、重建索引集合、双读，以及兼容窗口的开始版本、结束版本和清理条件。

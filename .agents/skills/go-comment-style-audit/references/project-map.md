@@ -1,28 +1,31 @@
-# 项目地图
+# Go 注释审计地图
 
-选择审计范围前先读这里。
-
-## AI 文档
-
-从当前仓库发现 AI 开发文档，不使用其它 checkout 的路径：
+## 规范发现
 
 ```bash
-rg --files | rg 'AGENTS\.md$|AI开发规范\.md$|AI开发提示词\.md$'
+rg --files -uu | rg '(^|/)AGENTS\.md$|AI开发规范\.md$|AI开发提示词\.md$'
 ```
 
-优先读取当前仓库的 `AGENTS.md`、`AI开发规范.md` 和 `AI开发提示词.md`。目标仓库缺少本地 AI 文档时，按最近的 `AGENTS.md`，并从当前源码验证风格。
+优先读取当前仓库的 `AGENTS.md` 和 AI 开发文档。仓库缺少明确规则时，从附近源码和测试验证风格，不复制其它项目的注释模板。
 
-## 审计范围规则
+## 范围选择
 
-- 实现后的“重新校验”：审计已改文件和附近共享 struct/helper。
-- “全仓库”或“确保没有类似问题”：扫描所有非测试 Go 文件，并包含 private helper、struct field、const/var block、匿名局部 struct field。
-- route-security 代码：private validator 和 helper struct 也视为契约的一部分；注释要解释契约含义，不只是 exported API。
-- config、API request/response、task payload、GORM model、持久化 JSON struct：相关字段要说明元素形态、单位、默认行为、排序、去重、空值语义或风险。
+- 实现后复核：扫描本轮修改文件及其共享结构体、helper 和契约。
+- “全仓库”或“确保没有类似问题”：扫描所有生产 Go 文件，并人工复核工具不覆盖的动态注册和关键逻辑。
+- route/security：私有 validator 和 helper struct 也属于稳定契约。
+- config、request/response、task payload、GORM Model、持久化 JSON：字段注释说明元素形态、单位、默认值、排序、去重、空值或风险。
 
-## 验证模式
+## 判断标准
+
+- 保留解释“为什么、从哪里来、边界是什么”的注释。
+- 删除逐字复述标识符、空泛“处理数据”和失效历史背景。
+- 长段注释如果只解释连续 wrapper、深层嵌套、泛名或重复状态判断，先通过内联转发层、提前返回、准确命名或收口重复规则消除绕行；协议、算法、数据形状和故障边界无法由代码表达时才保留结构化注释。
+- 注释缺失与过度封装、隐式魔法、重复逻辑一起审查。
+
+## 验证顺序
 
 1. 运行 AST scanner。
-2. 按源码风格修复有价值的发现。
+2. 结合上下文处理有效发现。
 3. 重新运行 scanner。
-4. 运行相关 `go test` package。
+4. 运行每个修改 Go 文件的归属包测试；公共类型、helper、配置结构或路由契约变化时，用 `rg`/`go list` 找出并运行全部直接调用包。
 5. 运行 `git diff --check` 和 `git status --short`。

@@ -1,59 +1,84 @@
-# Admin 服务
+# Admin 后台管理服务
 
-`admin` 是后台管理服务端工程，负责管理员认证、权限、审计、系统配置、运行配置、任务系统、文件传输、前台用户管理和用户标签等后台能力。项目采用 go-zero 风格的模块化单体结构，通过同一二进制按 `mode` 组合启动 API、Worker 和 Scheduler。
+`admin` 是后台管理服务，负责管理员认证与授权、审计、系统配置、任务调度、文件传输、前台用户管理和用户标签等后台能力。项目采用 go-zero 风格的模块化单体架构，通过同一二进制按运行模式组合启动 HTTP API、Worker 和 Scheduler。
 
-本文只说明工程框架、启动方式、部署入口和开发边界；接口字段、任务规则和运维细节以 `docs/site` 下的专题文档为准。
+本文面向首次接手项目的开发与运维人员，只保留工程定位、启动方式、核心边界和验证入口。接口字段、任务规则与发布细节以 [`docs/site`](docs/site/文档首页.md) 下的专题文档为准。
 
-> **AI 开发必读**：使用 AI 生成代码、重构、补测试或补文档前，必须先阅读 [AGENTS.md](AGENTS.md)、[AI开发规范](docs/site/角色文档/后端开发/AI开发规范.md) 和 [AI开发提示词](docs/site/角色文档/后端开发/AI开发提示词.md)。
+> 使用 AI 修改代码、配置、SQL、脚本或文档前，必须先阅读 [AGENTS.md](AGENTS.md)、[AI 开发规范](docs/site/角色文档/后端开发/AI开发规范.md) 和 [AI 开发提示词](docs/site/角色文档/后端开发/AI开发提示词.md)。
 
-## 分支定位
+## 快速导航
 
-`admin` 与 `api` 的表路由方案必须成对选择同名分支，不能混用两套路由配置或迁移流程。三个长期分支的职责如下：
+| 目标 | 文档或入口 |
+| --- | --- |
+| 了解系统边界与运行组件 | [系统组件功能说明](docs/site/角色文档/后端开发/系统组件功能说明.md) |
+| 开始本地开发 | [本地启动](#本地启动) |
+| 新增路由、任务或组件 | [开发扩展指南](docs/site/角色文档/后端开发/开发扩展指南.md) |
+| 查询接口契约 | [接口文档首页](docs/site/接口文档/接口文档首页.md) |
+| 初始化新库或交付存量库 SQL | [数据库初始化与变更交付治理](docs/site/角色文档/运维/数据库迁移治理.md) |
+| 准备发布 | [部署发布指南](docs/site/角色文档/运维/部署发布指南.md) |
+| 运行和排查任务系统 | [任务系统运行与操作手册](docs/site/功能模块/任务系统/任务系统使用手册.md) |
+| 操作或排查用户标签 | [用户标签操作与验收手册](docs/site/功能模块/用户标签/用户标签操作手册.md)、[故障处置手册](docs/site/功能模块/用户标签/任务系统与用户标签排障手册.md) |
 
-| 分支 | 功能定位 | 表路由与扩容职责 |
-| --- | --- | --- |
-| `main` | 日常开发、集成和交付基线；默认直连 MySQL 并以单表运行，同时提供可复用的固定桶物理表路由。 | `user.route_shard_count` 默认 1，运行时支持 `1/2/4/.../1024`；生产拆分仍必须选择下面对应分支的迁移流程。 |
-| `table-sharding/shardingsphere-proxy-alternative` | ShardingSphere-Proxy 候选方案，Admin/API 始终访问逻辑表。 | Proxy 管理物理表、存储单元和路由；Admin 提供 `deploy/shardingsphere`、`cmd/shardbackfill` 和 `cmd/shardingctl` 迁移与规则资产。 |
-| `table-sharding/app-table-sharding` | 应用内分表候选方案，适用于同一 MySQL 内按固定桶水平拆表。 | Admin/API 按当前物理表数量计算表名；Admin 使用 `cmd/tableshard` 完成在线复制、短暂停写校验和配置切换，不部署常驻分表代理。 |
+## 服务边界
 
-两个候选分支是互斥方案，不是可叠加功能；切换方案前必须同时核对 Admin/API 分支、配置和数据迁移状态。
+Admin 负责后台控制面和异步执行面：
 
-`main` 是唯一公共开发基线。Proxy 分支除 README 的分支定位和目录说明外，代码、配置、测试及专题文档必须与 `main` 完全一致；部署时保持 `user.route_shard_count=1`，应用访问逻辑表，由 Proxy 负责物理路由。应用分表分支只保留迁移方式所需的路由配置、迁移资产、测试和文档差异。合并后运行 `make branch-drift-check`，功能分支可通过 `BRANCH_VARIANT=proxy` 或 `BRANCH_VARIANT=app` 指定目标方案。
+- 管理员登录、MFA、RBAC、权限码和审计日志。
+- 系统配置、运行配置、密钥、缓存、消息和安全调试。
+- 前台用户资料、状态、密码和运行态同步。
+- Asynq 队列、工作流、周期调度、任务监控和失败归档。
+- 用户标签计算、事件 outbox、定向重算和排障入口。
+- 本地或 S3 文件存储、断点续传和异步导出。
+- Kafka Collector 消费、失败账本、重试和告警。
+
+面向前台用户的认证和资料接口由同工作区的 `api-go` 负责。Admin 不应承载前台请求热路径，也不应复制 API 服务的登录态实现。
 
 ## 技术栈
 
-- Go `1.26.5`
-- go-zero HTTP 服务框架
-- GORM + MySQL，支持主从读写路由和命名扩展库
-- Redis + redsync，支撑缓存、分布式锁、任务调度锁和运行期状态
-- Asynq + robfig/cron，承载 Worker、Scheduler、工作流和周期任务
-- JWT + MFA + RBAC + 审计日志，支撑后台登录态和权限链路
-- 可选签名验签、AES/RSA 加解密和路由安全清单
-- Kafka-only 通用 Collector 与失败账本重试
-- OpenTelemetry Trace、Prometheus 指标和结构化访问日志
+- Go `1.26.5`、go-zero HTTP 框架。
+- GORM + MySQL，支持主从读写路由和命名扩展库。
+- Redis + redsync，用于缓存、分布式锁和运行态状态。
+- Asynq + robfig/cron，用于 Worker、Scheduler 和工作流。
+- Kafka Collector、OpenTelemetry Trace、Prometheus 指标和结构化日志。
+- JWT、MFA、RBAC，以及可选的签名验签和字段级加解密。
 
-## 运行链路
+## 分支与表路由
+
+`admin-go` 与 `api-go` 必须成对使用同名分支和同一套路由配置。三条长期分支互斥，不能叠加：
+
+| 分支 | 定位 | 数据路由职责 |
+| --- | --- | --- |
+| `main` | 唯一公共开发与交付基线 | 默认单表；`user.route_shard_count` 支持 `1/2/4/.../1024`，生产拆分需选用对应候选分支的迁移流程 |
+| `table-sharding/shardingsphere-proxy-alternative` | ShardingSphere-Proxy 候选方案 | 应用访问逻辑表；Proxy 管理物理表和路由，Admin 提供部署、回填与规则工具 |
+| `table-sharding/app-table-sharding` | 应用内固定桶分表候选方案 | Admin/API 计算物理表名；Admin 负责在线复制、校验和配置切换 |
+
+Proxy 分支相对 `main` 只允许方案文档和 Proxy 部署资产差异；应用分表分支只允许物理表路由、复制/校验/切换工具及对应文档差异。合并后执行下列命令，退出码必须为 `0`，报告中不得出现允许清单之外的代码、配置、SQL 或接口差异：
+
+```bash
+make branch-drift-check
+```
+
+在候选分支可通过 `BRANCH_VARIANT=proxy` 或 `BRANCH_VARIANT=app` 指定检查目标。
+
+## 运行架构
 
 ```text
 cmd/admin
   -> bootstrap.WireWithConfigMode
-  -> 加载配置、校验安全边界、按配置初始化 logger/trace/MySQL/Redis/Kafka
-  -> 创建 ServiceContext
-  -> 注册 collector、task_runtime、http_server 启动组件
+  -> 加载并校验配置，初始化日志、Trace、MySQL、Redis、Kafka
+  -> 创建 ServiceContext，注册启动组件和任务插件
   -> 按 mode 启动 API、Worker、Scheduler
-  -> handler.RegisterPublicHandlersWithModules / RegisterInternalHandlersWithModules
-  -> recover -> trace -> access log -> recover
-  -> handler/shared 解析请求、鉴权、审计和统一响应
-  -> logic 编排业务、事务、缓存和任务投递
-  -> model / infra / task / pkg 访问数据库、Redis、队列、文件存储和外部服务
+  -> handler / worker / scheduler 接收请求或任务
+  -> logic / jobs 编排业务、事务、缓存和队列
+  -> model / infra / task / pkg 访问数据库、Redis、MQ、存储和外部服务
 ```
 
-所有 HTTP 响应保持统一结构：
+HTTP 响应统一为：
 
 ```json
 {
   "status": true,
-  "code": 1000,
+  "code": 1,
   "message": "成功",
   "data": {},
   "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -61,128 +86,77 @@ cmd/admin
 }
 ```
 
-`traceId` 用于串联一次请求的完整链路，`spanId` 用于定位当前服务的处理片段；标准 HTTP 中间件还会通过 `X-Trace-Id`、`X-Span-Id` 响应头回传相同标识，便于前端报错与日志、审计和 Trace 平台对齐。
+`traceId` 关联完整请求链路，`spanId` 定位当前处理片段；中间件同时回传 `X-Trace-Id` 和 `X-Span-Id` 响应头。
 
 ## 运行模式
 
-`-mode` 使用位掩码控制启动单元：
+`-mode` 是位掩码，解析优先级为命令行 `-mode`、配置文件 `run_mode`、默认值 `7`。
 
-| mode | 含义 |
+| mode | 启动单元 |
 | --- | --- |
-| `1` | 仅启动 API |
-| `2` | 仅启动 Worker |
-| `3` | 启动 API + Worker |
-| `4` | 仅启动 Scheduler |
-| `5` | 启动 API + Scheduler |
-| `6` | 启动 Worker + Scheduler |
-| `7` | 启动 API + Worker + Scheduler |
+| `1` | API |
+| `2` | Worker |
+| `3` | API + Worker |
+| `4` | Scheduler |
+| `5` | API + Scheduler |
+| `6` | Worker + Scheduler |
+| `7` | API + Worker + Scheduler |
 
-解析优先级为：命令行 `-mode` > 配置文件 `run_mode` > 默认值 `7`。生产常规部署建议拆成控制面和执行面：
+生产环境通常拆分控制面和执行面：
 
 ```bash
-./bin/admin -f ./etc/config.yaml -mode 5  # API + Scheduler
-./bin/admin -f ./etc/config.yaml -mode 2  # Worker
+./bin/admin -f ./etc/config.yaml -mode 5
+./bin/admin -f ./etc/config.yaml -mode 2
 ```
 
 ## 目录结构
 
-本分支由 Admin/API 根据固定逻辑桶和当前物理表数量计算真实表名；`cmd/tableshard` 与 `internal/sharding` 是应用内扩容主链路，Proxy 相关目录仅保留为方案对照和历史迁移资产。
+本分支由 Admin/API 根据固定逻辑桶和当前物理表数量计算真实表名；`cmd/tableshard` 与 `internal/sharding` 是应用内扩容主链路，Proxy 目录只保留方案对照和历史迁移资产。
 
-```text
-admin
-├── cmd                       # 二进制入口
-│   ├── admin                 # HTTP / Worker / Scheduler 组合启动入口
-│   ├── migrate               # 数据库迁移命令入口
-│   ├── shardbackfill         # 固定 shard_no 分批回填、断点续跑和全量校验工具
-│   ├── shardingctl           # 保留的 ShardingSphere DistSQL 规则生成工具
-│   └── tableshard            # 应用内物理表规划、在线复制、校验和清理入口
-├── common                    # 跨包公共契约：业务码、常量、i18n、Redis Key、嵌入资产、运行态配置
-├── docs                      # 文档站、接口文档、运维手册、监控资产
-│   ├── site
-│   │   ├── 角色文档
-│   │   │   ├── 后端开发    # AI 规范、扩展指南、组件清单、任务队列、配置说明
-│   │   │   ├── 前端与测试  # 联调、权限码、验收说明
-│   │   │   └── 运维        # 部署发布、数据库迁移治理
-│   │   ├── 功能模块        # 任务系统、用户标签等功能手册
-│   │   └── 接口文档        # 后台系统、任务系统、用户标签接口
-│   ├── prometheus            # Prometheus 告警规则
-│   ├── grafana               # Grafana 面板
-│   └── handler.go            # 文档站资源读取入口
-├── deploy                    # 发布、集成环境和保留的 Proxy 方案资产
-│   ├── docker                # Admin 容器镜像
-│   ├── integration           # 本地集成依赖编排
-│   ├── shardingsphere        # 保留的 Proxy 镜像、配置模板、DistSQL 和迁移 SQL
-│   └── systemd               # 控制面和 Worker 服务单元
-├── etc                       # 配置模板和运行期配置拆分
-│   └── config.d              # runtime.yaml 等运行期大列表配置
-├── helper                    # HTTP JSON 响应和轻量通用函数
-├── internal                  # 主工程代码
-│   ├── audit                 # 管理员审计事件记录与脱敏
-│   ├── bootstrap             # 配置加载、组件装配、热加载、启动关闭
-│   ├── config                # YAML 配置结构和解析契约
-│   ├── database              # 数据库迁移、迁移状态表和 SQL 资产
-│   ├── handler               # HTTP 路由注册、RouteMeta、RouteContract 和请求入口
-│   ├── infra                 # MySQL、Redis、Kafka、Lark、日志、Trace、Collector 适配
-│   ├── jobs                  # 归档、导出、用户标签等后台任务实现
-│   ├── logic                 # 用例编排、规则校验、事务边界、缓存和运行配置
-│   ├── middleware            # 鉴权、签名、加解密、内网限制、访问日志、Recover
-│   ├── model                 # GORM Model、身份目录、物理表定位和数据访问
-│   ├── requestctx            # 链路字段、调用方、任务和 trace 元数据
-│   ├── routealias            # 路由别名常量
-│   ├── security              # 路由字段级签名、加密、大小限制和测试向量
-│   ├── sharding              # 固定桶物理表计划、扩容区间和在线迁移实现
-│   ├── svc                   # ServiceContext 与基础设施依赖聚合
-│   ├── task                  # Asynq 队列、工作流、任务插件运行时和进度统计
-│   └── types                 # API 请求、响应、列表项和参数校验
-└── pkg                       # 可复用工具包：对象存储、文件传输、Excel、批处理
-```
+| 目录 | 职责 |
+| --- | --- |
+| `cmd` | Admin、迁移、回填、分表规划和在线迁移入口；`shardingctl` 仅保留 Proxy 规则生成能力 |
+| `common` | 业务码、i18n、Redis Key、嵌入资产和稳定公共契约 |
+| `docs` | 文档站、接口文档、运维手册、Prometheus 与 Grafana 资产 |
+| `deploy` | Docker、systemd、集成环境和保留的 Proxy 方案资产 |
+| `etc` | 配置样例、本地配置和运行期配置文件 |
+| `internal/bootstrap` | 配置加载、组件装配、热加载和生命周期 |
+| `internal/handler` | 路由规格、鉴权审计、参数解析和响应写出 |
+| `internal/logic` | 用例编排、规则校验、事务和缓存边界 |
+| `internal/jobs` | 归档、导出、用户标签等后台业务任务 |
+| `internal/model` | GORM Model、身份目录、物理表定位和数据访问 |
+| `internal/sharding` | 固定桶物理表计划、扩容区间和在线迁移实现 |
+| `internal/task` | Asynq 队列、工作流、任务插件和调度运行时 |
+| `internal/infra` | MySQL、Redis、Kafka、日志、Trace 和外部适配 |
+| `internal/types` | 请求、响应、列表项和参数校验契约 |
+| `pkg` | 文件存储、传输、Excel 和批处理等可复用能力 |
 
-`data/` 和 `logs/` 是本地运行输出目录；不要把本地密钥、上传文件、临时数据或日志当作发布资产提交。
-
-## 核心能力
-
-- 后台认证：验证码、登录、刷新、退出、MFA、JWT 登录态和权限码查询。
-- 权限治理：管理员、角色、权限树、前端权限码、行级操作审计。
-- 系统管理：系统配置、运行配置、缓存管理、秘钥管理、安全调试和消息中心。
-- 前台用户管理：后台直连用户表处理资料、状态、密码和 API 运行态同步。
-- 任务系统：Asynq 队列、工作流、周期调度、任务列表、队列控制、失败归档和 Lark 告警。
-- 用户标签：full / delta / targeted / recalculate 工作流、运行期 UID 索引、事件 outbox 和排障接口。
-- 文件传输：本地或 S3 存储、服务端中转、断点续传、导出文件下载和上传策略注册。
-- Collector：正常链路只走 Kafka，用于后台轻量事件采集、批量消费和失败账本重试。
-- 可观测性：提供 `/api/live`、`/api/ready`、`/api/metrics`、文档站 `/api/docs`，并配套日志、Trace、指标和告警规则。
-
-## 分层约定
-
-- `cmd` 只处理命令行参数和进程退出码，真实装配进入 `bootstrap`。
-- `bootstrap` 负责配置加载、组件生命周期、热加载边界和注册清单派生，不写业务规则。
-- `handler` 只声明 `RouteSpecs`、解析请求、执行鉴权审计和统一响应；复杂流程进入 `logic`。
-- `logic` 负责用例编排、规则校验、事务边界、缓存保护和错误上下文。
-- `model` 优先使用 GORM 链式调用，事务内必须沿用同一个 `tx`。
-- `task` 提供队列、工作流、插件运行时和统计基础设施；具体业务任务放在 `internal/jobs/<domain>`。
-- `types` 中请求以 `Req` 结尾，响应以 `Resp` 结尾，列表项以 `Item` 结尾；请求结构体需要实现 go-zero `Validate()`。
-- `common` 只放跨包稳定契约和小型公共能力，领域规则优先留在所属 `logic/model/jobs` 包。
-- `pkg` 只放可复用工具包；没有跨领域复用价值的能力不要放进 `pkg`。
+`data/` 和 `logs/` 是本地运行目录。不要提交本地密钥、上传文件、临时数据或日志。
 
 ## 统一注册点
 
-| 注册对象 | 统一入口 | 说明 |
-| --- | --- | --- |
-| 启动组件 | `internal/bootstrap/components/builtin/specs.go:DefaultSpecs` | Collector、CDC、任务运行时、HTTP Server 从规格派生真实组件和注册清单 |
-| HTTP 路由 | `internal/handler/routes.go:builtinRouteModuleSpecs` + 各模块 `RouteSpecs` | 真实路由、RouteContract、访问日志降噪和文档校验都从路由规格派生 |
-| RouteMeta | `internal/handler/shared/route_meta.go:DefaultRouteMetas` | 路由别名、中文说明和审计动作集中登记 |
-| 路由安全清单 | `internal/handler/route_security_manifest.go:DefaultRouteSecurityManifest` | 汇总 method、path、chain 和字段级签名加密策略，用于文档和前端同步 |
-| 任务插件 | `internal/bootstrap/components/builtin/task.go:DefaultTaskPluginSpecs` + `internal/jobs/plugins.go:PluginSpecs` | core、archive、excel_export、task_report、user_tag 和维护任务插件从规格派生 |
-| 运行时扩展 | 各能力归属包 `RuntimeRegistrySpecs` | `pkg/storage`、`internal/logic/file`、`internal/infra/collectorx` 分别声明自身扩展入口 |
-| 数据库迁移 | `internal/database/migrations.go:defaultMigrationSpecs` | 迁移版本、名称、SQL 资产和 bootstrap-only 边界集中登记 |
-| Redis Key | `common/rediskeys` | Key 模板集中定义并带静态检查，业务代码不散落高基数字符串 |
+| 对象 | 权威入口 |
+| --- | --- |
+| 启动组件 | `internal/bootstrap/components/builtin/specs.go:DefaultSpecs` |
+| HTTP 路由 | `internal/handler/routes.go:builtinRouteModuleSpecs` 与各模块 `RouteSpecs` |
+| RouteMeta | `internal/handler/shared/route_meta.go:DefaultRouteMetas` |
+| 路由安全清单 | `internal/handler/route_security_manifest.go:DefaultRouteSecurityManifest` |
+| 任务插件 | `internal/bootstrap/components/builtin/task.go:DefaultTaskPluginSpecs` 与 `internal/jobs/plugins.go:PluginSpecs` |
+| 运行时扩展 | 各能力归属包的 `RuntimeRegistrySpecs`；组件文档逐项标明“生产已启用”或“基础能力/未激活” |
+| 数据库初始化基线 | `internal/database/migrations.go:defaultMigrationSpecs` |
+| Redis Key | `common/rediskeys` |
 
-详细注册表见 [组件注册清单](docs/site/角色文档/后端开发/组件注册清单.md)。
+完整登记规则见[组件注册清单](docs/site/角色文档/后端开发/组件注册清单.md)。修改路由、RouteMeta 或安全字段后执行：
 
-路由、RouteMeta 或安全策略变更后，执行 `make update-route-security-manifest` 同步后端文档与 `admin-vue` 前端运行清单。
+```bash
+make update-route-security-manifest
+```
 
 ## 本地启动
 
-准备 MySQL、Redis 后，复制样例配置并调整连接信息、`app_id`、`jwt_secret`、安全秘钥、运维令牌和文件存储路径：
+### 1. 准备依赖
+
+必需依赖为 Go `1.26.5`、MySQL 和 Redis；Kafka、对象存储、OTLP 等依赖按启用能力准备。
 
 ```bash
 cp etc/config.dnmp.sample.yaml etc/config.yaml
@@ -190,26 +164,19 @@ cp etc/config.d/runtime.sample.yaml etc/config.d/runtime.yaml
 go mod download
 ```
 
-执行迁移前先查看和预览：
+修改本地配置中的数据库、Redis、`app_id`、`jwt_secret`、安全密钥、运维令牌和存储路径。不要把真实生产密钥写入样例文件。
+
+### 2. 初始化本地空库
 
 ```bash
 make migrate-status MIGRATE_CONFIG=./etc/config.yaml
 make migrate-dry-run MIGRATE_CONFIG=./etc/config.yaml
-```
-
-空库初始化或已初始化库补齐基线登记时执行 bootstrap-only 基线迁移：
-
-```bash
 make migrate-bootstrap MIGRATE_CONFIG=./etc/config.yaml
 ```
 
-已有库只执行普通迁移：
+以上命令只用于确认无业务数据的全新空库。仓库内 DDL/DML 是完整初始化基线，不负责升级已有数据库；存量库变化由开发在被忽略的 `data/sql-changes/<change-id>/` 生成本地增量 SQL，通过发布工单交给 DBA/运维命令行执行，SQL 文件不提交仓库、不追加迁移版本。完整边界见[数据库初始化与变更交付治理](docs/site/角色文档/运维/数据库迁移治理.md)。
 
-```bash
-make migrate-up MIGRATE_CONFIG=./etc/config.yaml
-```
-
-启动开发环境：
+### 3. 启动服务
 
 ```bash
 go run ./cmd/admin -f ./etc/config.yaml -mode 7
@@ -224,116 +191,70 @@ go run ./cmd/migrate -version
 
 ## 配置边界
 
-配置文件入口：
-
-- `etc/config.sample.yaml`：标准样例。
+- `etc/config.sample.yaml`：标准配置样例。
 - `etc/config.dnmp.sample.yaml`：本地 dnmp 环境样例。
-- `etc/config.yaml`：本地实际运行配置，不应提交生产秘钥。
+- `etc/config.yaml`：本地实际配置，不应提交生产密钥。
 - `etc/config.d/runtime.sample.yaml`：运行期大列表配置样例。
-- `etc/config.d/runtime.yaml`：本地运行期配置文件。
+- `etc/config.d/runtime.yaml`：本地运行期配置。
 
-当前 `runtime_config.source=database` 时，`task_periodic` 和 `archive_jobs` 由运行配置 active release 接管；运行期文件中的同名配置只作为首次导入种子。`workflows` 仍保留在运行期文件中并参与热加载。
+项目自有 YAML 样例中的每个固定配置字段必须保留紧邻字段上方、与字段同缩进的中文注释。注释至少写明消费组件和用途，并如实补充源码已定义的取值/单位、缺省与空值、热加载或重启、敏感信息及跨字段约束；父节点概述不能替代子字段说明。动态 map 的重复数据项由父字段统一定义 key/value、空值和合并语义，第三方 schema 与纯数据文件按 [AI 开发规范](docs/site/角色文档/后端开发/AI开发规范.md#yaml-配置字段行级注释)记录排除依据。
 
-新增配置时必须区分：
+当 `runtime_config.source=database` 时，`task_periodic` 和 `archive_jobs` 由运行配置 active release 管理，运行期文件中的同名配置只用于首次导入；`workflows` 仍从运行期文件加载并参与热更新。
 
-- 运行期参数：可热加载，例如部分任务批次、分片、限速、归档窗口和用户标签参数。
-- 启动期能力：必须重启，例如 HTTP 监听、MySQL、Redis、Kafka、OTLP、路由、任务插件和 workflow 定义注册。
+运行期参数可由已有应用器热加载；HTTP 监听、MySQL、Redis、Kafka、OTLP、路由、任务插件和 workflow 定义等启动期能力变更后必须重启。字段说明见[配置字段说明](docs/site/角色文档/后端开发/配置字段说明.md)。
 
-配置字段说明见 [配置字段说明](docs/site/角色文档/后端开发/配置字段说明.md)。
+## 开发与验证
 
-## 数据库迁移
-
-迁移入口是 `cmd/migrate`，迁移定义来自 `internal/database.defaultMigrationSpecs`，SQL 资产放在 `internal/database/assets/`。执行结果会登记到 `schema_migrations`。
-
-迁移分两类：
-
-- bootstrap-only 基线迁移：通过 `make migrate-bootstrap` 显式执行，用于空库初始化或已初始化库补齐基线登记。
-- 普通迁移：通过 `make migrate-up` 执行，适合已有库增量升级。
-
-迁移治理要求见 [数据库迁移治理](docs/site/角色文档/运维/数据库迁移治理.md)。
-
-## 接口与文档
-
-接口文档位于 `docs/site/接口文档/`：
-
-- `后台系统/`：认证、管理员、角色权限、系统配置、文件传输、消息、缓存、秘钥、安全调试、前台用户管理等接口。
-- `任务系统/`：任务总控、队列、任务列表、监控、运行配置、Collector 等接口。
-- `用户标签/`：用户标签业务、工作流、内网接口和指定标签重算接口。
-
-文档站入口是 `/api/docs`。新增或调整接口时，需要同步 Go types、RouteMeta、权限码、审计动作、安全字段、接口文档、业务码和 i18n 文案。
-
-## 验证命令
-
-日常开发优先运行：
+日常开发按改动范围运行：
 
 ```bash
 make fmt-check
 make test
+make vet
 make build
 make build-tools
 git diff --check
 ```
 
-发布前运行完整检查：
+发布候选运行完整门禁：
 
 ```bash
 make ci
 ```
 
-`make ci` 会执行格式检查、全量测试、主服务构建、迁移工具构建、秘钥扫描、Prometheus 规则检查、分支差异门禁和 `git diff --check`。如果本机没有 `promtool`，规则检查会优先尝试 Docker 镜像。
+`make ci` 包含格式、全量测试、race、vet、构建、密钥扫描、依赖漏洞检查、Prometheus 规则、分支差异和 diff 检查。缺少 `promtool` 时会尝试使用 Docker 镜像。
 
-## 发布与观测
+开发时遵守以下分层：
 
-发布资产：
+- Handler 只负责路由、参数、鉴权审计和响应；业务流程进入 Logic。
+- Logic 负责用例、事务、缓存和错误上下文，不临时创建基础设施连接。
+- Model 优先使用 GORM 链式调用，事务内始终沿用同一个 `tx`。
+- 原生 SQL 与 Redis Lua 必须作为可审查的嵌入资产维护。
+- 新增接口同步 types、RouteMeta、权限、审计、安全字段、业务码、i18n、文档和前端契约。
+- 新增任务或运行时能力必须接入统一注册点并补测试，不能只提交孤立实现。
 
-- `deploy/docker/Dockerfile`
-- `deploy/systemd/admin-control.service`
-- `deploy/systemd/admin-worker.service`
-- `deploy/integration/docker-compose.yml`
-- `docs/prometheus/admin-alerts.yml`
-- `docs/grafana/`
+## 文档与观测
 
-发布前至少确认：
+- Admin 文档站：`/api/docs`。
+- 存活探针：`/api/live`，不访问外部依赖。
+- 就绪探针：`/api/ready`，检查启用的关键依赖和组件。
+- Prometheus 指标：`/api/metrics`。
 
-- `make migrate-dry-run` 输出符合预期。
-- `make migrate-up` 或首次空库 `make migrate-bootstrap` 已按环境正确执行。
-- `/api/live`、`/api/ready`、`/api/metrics` 和 `/api/docs` 可访问。
-- Worker、Scheduler、Collector、任务插件和运行配置 active release 状态正常。
-- MySQL、Redis、Kafka、Lark、Trace、文件存储均指向目标环境。
-- 生产配置中没有样例 `jwt_secret`、私钥、AES Key、对象存储密钥或运维令牌。
+前台 API 文档通过 Admin 文档站的 `/api/docs/api` 独立入口展示，由 Admin 通过内网代理读取 `api-go` 文档资源，浏览器不直接访问 API 内网文档接口。
 
-完整流程见 [部署发布指南](docs/site/角色文档/运维/部署发布指南.md)。
+首次上线若无法登录，按[内网初始化管理员接口](docs/site/接口文档/后台系统/内网初始化管理员接口.md)重置已存在的超级管理员。该接口不创建账号、不提升角色，并要求 Ops HMAC、一次性 nonce、Redis 防重放；跨主机链路使用 mTLS。
 
-> **首次上线重点**：如果后台无法登录，先确认数据库里已有超级管理员账号，再通过独立内网监听器的 `POST /internal/auth/init-admin-bootstrap` 重置该账号。请求必须通过 Ops HMAC、一次性 nonce 和 Redis 防重放校验；跨主机使用 mTLS。该接口不创建账号、不提升角色，详见[内网初始化管理员接口](docs/site/接口文档/后台系统/内网初始化管理员接口.md)。
+## 发布检查
 
-## 开发约束
+以下条目必须保留命令输出、接口响应、任务记录或发布工单作为证据，不能只填写“正常”或“已确认”：
 
-修改代码、配置、SQL、脚本或文档前先读：
+- 新空库已按 `migrate-status -> migrate-dry-run -> migrate-bootstrap` 顺序初始化且进程退出码为 `0`；已有环境的 DBA/运维工单已记录 SQL SHA-256、执行顺序、影响行数和 `90_verify.sql` 或等价校验结果。候选版本中不存在一次性增量 SQL。
+- `/api/live` 返回 HTTP 2xx 且不依赖外部服务；`/api/ready` 返回 HTTP 2xx，并且响应中所有已启用关键依赖与组件均为就绪；`/api/metrics` 可被目标 Prometheus 抓取；授权管理员可打开 `/api/docs`，未授权请求按鉴权策略拒绝。
+- API、Worker、Scheduler 按目标 `mode` 启动。启用任务能力时，至少一条受控冒烟任务能够完成 enqueue/claim/execute/terminal 状态转换；启用周期任务时，active release 与目标发布版本一致且下一次触发时间可见；启用 Collector 时，目标 topic、consumer group、失败账本和告警通道均已验证。
+- MySQL、Redis、Kafka、Lark、Trace 和文件存储的实际连接目标与发布环境清单一致；通过脱敏诊断、就绪检查或受控测试验证，禁止在交付记录中输出密码、token、私钥或完整 DSN。
+- 配置与部署资产已通过密钥扫描；样例密钥、私钥、AES Key、对象存储密钥和运维令牌未进入 Git、镜像、日志或发布工单正文。真实密钥只从目标环境的密钥管理渠道注入。
 
-- `AGENTS.md`
-- `docs/site/角色文档/后端开发/AI开发规范.md`
-- `docs/site/角色文档/后端开发/AI开发提示词.md`
-
-关键要求：
-
-- 请求参数放在 `internal/types`，需要实现 go-zero `Validate()`。
-- handler 只负责解析、鉴权审计和响应写出，业务编排放在 `internal/logic`。
-- 新增接口必须同步接口文档、RouteMeta、权限码、审计动作、业务码和 i18n。
-- 新增默认任务必须进入 `internal/jobs/plugins.go:PluginSpecs`，核心任务能力放在 `taskruntime.CorePluginSpecs`；外部注入插件需要明确说明边界。
-- Redis Key 必须走 `common/rediskeys`，禁止在业务代码散落高基数通配 key。
-- 原生 SQL / Lua 必须作为代码资产，通过 `go:embed` 加载并在执行前剥离文件头说明。
-- 新增运行期能力必须同步注册清单和测试，不能只加业务实现。
-
-## 文档索引
-
-- [架构说明](docs/架构说明.md)
-- [开发规范](docs/开发规范.md)
-- [质量审计](docs/质量审计.md)
-- [接口文档统一规范](docs/site/接口文档/接口文档统一规范.md)
-- [开发扩展指南](docs/site/角色文档/后端开发/开发扩展指南.md)
-- [组件注册清单](docs/site/角色文档/后端开发/组件注册清单.md)
-- [任务队列与工作流指南](docs/site/角色文档/后端开发/任务队列与工作流指南.md)
-- [数据库迁移治理](docs/site/角色文档/运维/数据库迁移治理.md)
+发布资产和回滚流程见[部署发布指南](docs/site/角色文档/运维/部署发布指南.md)。
 
 ## License
 

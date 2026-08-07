@@ -1,4 +1,4 @@
 interface:
   display_name: "需求意图闸门"
-  short_description: "改代码前澄清意图和执行边界。"
-  default_prompt: "使用 $requirement-intent-gate 在改代码前确认真实需求、源码证据和执行边界。"
+  short_description: "在编辑前查证源码、澄清含糊需求、识别风险并确认安全执行边界。"
+  default_prompt: "使用 $requirement-intent-gate 在修改前确认这个需求的真实意图和安全边界。"

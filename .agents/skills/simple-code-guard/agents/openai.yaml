@@ -1,4 +1,4 @@
 interface:
   display_name: "简洁代码护栏"
-  short_description: "约束三项目代码保持简洁、清晰、易读、易维护并防止过度设计"
-  default_prompt: "使用 $simple-code-guard 复核并简化当前改动，保持业务语义、生产正确性与项目规范。"
+  short_description: "区分已启用、基础能力与废弃项，只删除确认无用代码和文件"
+  default_prompt: "使用 $simple-code-guard 区分生产已启用、基础能力未激活和确认废弃无用项，只清理有完整证据的复杂度。"

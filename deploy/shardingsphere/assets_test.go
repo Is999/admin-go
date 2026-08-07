@@ -121,6 +121,21 @@ func TestBootstrapAssetsFailOnExistingObjects(t *testing.T) {
 	}
 }
 
+// TestSingleTableLoadAssetUsesDefaultStorageUnit 验证单表元数据加载模板固定落到默认存储单元并提供核对命令。
+func TestSingleTableLoadAssetUsesDefaultStorageUnit(t *testing.T) {
+	asset := readAsset(t, "sql/load-single-tables.sql.tmpl")
+	for _, want := range []string{
+		"USE `__LOGICAL_DATABASE__`",
+		"SET DEFAULT SINGLE TABLE STORAGE UNIT = ds_0",
+		"LOAD SINGLE TABLE ds_0.*",
+		"SHOW SINGLE TABLES",
+	} {
+		if !strings.Contains(asset, want) {
+			t.Fatalf("load-single-tables.sql.tmpl missing %q", want)
+		}
+	}
+}
+
 // normalizeCreateTable 忽略迁移源和目标允许不同的表名与初始化幂等修饰，仅比较真实表结构。
 func normalizeCreateTable(source string) string {
 	start := strings.Index(source, "CREATE TABLE")

@@ -4,8 +4,10 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"admin/internal/bootstrap/components"
+	"admin/internal/config"
 	"admin/internal/svc"
 )
 
@@ -101,6 +103,34 @@ func TestComponentRegisterFailureUsesIndependentAlerter(t *testing.T) {
 	alert := alerter.alerts[0]
 	if alert.Operation != "register" || alert.TaskName != "component_registry" {
 		t.Fatalf("组件注册失败告警不符合预期: %+v", alert)
+	}
+}
+
+// TestAppStopWaitsForRequestBackgroundTask 校验应用停机先等待请求派生任务，再释放共享资源并返回。
+func TestAppStopWaitsForRequestBackgroundTask(t *testing.T) {
+	svcCtx := svc.NewServiceContext(config.Config{}, svc.Dependencies{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if !svcCtx.GoBackground(func() {
+		close(started)
+		<-release
+	}) {
+		t.Fatal("GoBackground() rejected task before shutdown")
+	}
+	<-started
+
+	stopResult := make(chan error, 1)
+	go func() {
+		stopResult <- (&App{ServiceContext: svcCtx}).Stop(context.Background())
+	}()
+	select {
+	case err := <-stopResult:
+		t.Fatalf("App.Stop() returned before background task finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-stopResult; err != nil {
+		t.Fatalf("App.Stop() error = %v", err)
 	}
 }
 

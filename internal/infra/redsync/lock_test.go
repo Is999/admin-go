@@ -177,26 +177,20 @@ func TestWithLockReturnsUnlockError(t *testing.T) {
 	}
 }
 
-// TestWithLockUnlocksOnPanic 校验业务 panic 时仍会释放锁，并保持 panic 向上抛出。
-func TestWithLockUnlocksOnPanic(t *testing.T) {
+// TestWithLockConvertsPanicToError 校验业务回调异常会转换成错误，并且仍会释放 owner 锁。
+func TestWithLockConvertsPanicToError(t *testing.T) {
 	// server 和 client 构造可重新竞争同一锁 key 的本地 Redis 环境。
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer client.Close()
 
-	// panicValue 和 recovered 校验 WithLock 只负责清理资源，不吞掉业务 panic。
+	// panicValue 用于确认返回错误保留异常原因和锁 key，便于最外层定位失败入口。
 	const panicValue = "lock callback panic"
-	var recovered any
-	func() {
-		defer func() {
-			recovered = recover()
-		}()
-		_ = WithLock(context.Background(), client, "lock:panic", time.Second, func(context.Context) error {
-			panic(panicValue)
-		})
-	}()
-	if recovered != panicValue {
-		t.Fatalf("recovered panic = %v, want %q", recovered, panicValue)
+	err := WithLock(context.Background(), client, "lock:panic", time.Second, func(context.Context) error {
+		panic(panicValue)
+	})
+	if err == nil || !strings.Contains(err.Error(), panicValue) || !strings.Contains(err.Error(), "lock:panic") {
+		t.Fatalf("WithLock() error = %v, want converted callback panic with lock key", err)
 	}
 	if err := WithLock(context.Background(), client, "lock:panic", time.Second, nil); err != nil {
 		t.Fatalf("expected lock to be released after panic, got %v", err)

@@ -6,6 +6,13 @@ import (
 	"admin/common/codes"
 )
 
+// TestValidateCatalog 确保发布物内嵌的全部语言资产可在应用启动前完成解析和注册。
+func TestValidateCatalog(t *testing.T) {
+	if err := ValidateCatalog(); err != nil {
+		t.Fatalf("ValidateCatalog() error = %v", err)
+	}
+}
+
 // TestNormalizeLocale 验证对应场景符合预期。
 func TestNormalizeLocale(t *testing.T) {
 	cases := []struct {

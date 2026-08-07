@@ -1041,6 +1041,32 @@ func TestEnqueueWorkflowTriggerRejectsConflictingScheduleOptions(t *testing.T) {
 	}
 }
 
+// TestEnqueueWorkflowTriggerReleasesReservationOnFirstEnqueueFailure 确保入口任务首次投递失败会释放本次唯一预占。
+func TestEnqueueWorkflowTriggerReleasesReservationOnFirstEnqueueFailure(t *testing.T) {
+	manager, cleanup := newTestManager(t)
+	defer cleanup()
+
+	definition := testWorkflowDefinition("enqueue-failure-release")
+	if err := manager.RegisterWorkflow(definition); err != nil {
+		t.Fatalf("注册工作流失败: %v", err)
+	}
+	manager.client = taskEnqueuerFunc(func(context.Context, *asynq.Task, ...asynq.Option) (*asynq.TaskInfo, error) {
+		return nil, errors.New("injected first enqueue failure")
+	})
+	const uniqueValue = "daily"
+	if _, err := manager.EnqueueWorkflowTrigger(context.Background(), &types.TriggerTaskWorkflowReq{
+		Name:             definition.Name,
+		UniqueKey:        uniqueValue,
+		UniqueTTLSeconds: new(60),
+	}); err == nil {
+		t.Fatal("EnqueueWorkflowTrigger() error = nil, want injected enqueue failure")
+	}
+	uniqueKey := manager.workflowUniqueKey(definition.Name, uniqueValue)
+	if exists, err := manager.redis.Exists(context.Background(), uniqueKey).Result(); err != nil || exists != 0 {
+		t.Fatalf("首次投递失败后唯一预占仍存在: key=%s exists=%d error=%v", uniqueKey, exists, err)
+	}
+}
+
 // TestStartWorkflowAllowsReservedUniqueReservation 验证已由当前实例预占的唯一键允许继续启动工作流。
 func TestStartWorkflowAllowsReservedUniqueReservation(t *testing.T) {
 	manager, cleanup := newTestManager(t)

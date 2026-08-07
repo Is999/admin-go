@@ -9,11 +9,13 @@ import (
 
 	keys "admin/common/rediskeys"
 	"admin/internal/config"
+	redislock "admin/internal/infra/redsync"
 	corelogic "admin/internal/logic"
 	"admin/internal/svc"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 // TestNormalizeSecurityCacheSyncPlan 验证补偿摘要输入会稳定排序、去重并过滤无效值。
@@ -112,6 +114,34 @@ func TestRunPendingSecurityCacheSyncFailsClosedOnSignal(t *testing.T) {
 	}
 	if !service.SecurityCacheSyncPending() {
 		t.Fatal("barrier signal must close local cache authentication")
+	}
+}
+
+// TestRunSecurityCacheSyncSkipsHeldLockWithoutRetry 校验后台补偿遇到其它实例持锁时立即成功跳过。
+func TestRunSecurityCacheSyncSkipsHeldLockWithoutRetry(t *testing.T) {
+	useRuntimeAppID(t, "site-a")
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	service := svc.NewServiceContext(
+		config.Config{AppID: "site-a"},
+		svc.Dependencies{
+			SiteDBs: svc.SiteDatabases{MainDB: &gorm.DB{}},
+			Rds:     client,
+		},
+	)
+	holder := redislock.NewLock(client, keys.SecurityCacheSyncLockRedisKey())
+	if err := holder.TryLock(context.Background(), time.Minute); err != nil {
+		t.Fatalf("holder.TryLock() error = %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Unlock() })
+
+	startedAt := time.Now()
+	if err := NewSecurityCacheSyncWorker(service).runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce() lock contention error = %v, want successful skip", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("runOnce() lock contention elapsed = %v, want no retry backoff", elapsed)
 	}
 }
 

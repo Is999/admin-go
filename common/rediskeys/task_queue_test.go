@@ -152,9 +152,6 @@ func TestTaskRuntimeAndWorkflowKeys(t *testing.T) {
 	if got := keys.TaskWorkflowUniqueKey("user_tag.delta.refresh", "daily"); got != "app:215:task:workflow:unique:user_tag.delta.refresh:daily" {
 		t.Fatalf("keys.TaskWorkflowUniqueKey() = %q", got)
 	}
-	if got := keys.TaskWorkflowUniqueLockKey("user_tag.delta.refresh", "daily"); got != "app:215:task:workflow:unique-lock:user_tag.delta.refresh:daily" {
-		t.Fatalf("keys.TaskWorkflowUniqueLockKey() = %q", got)
-	}
 }
 
 // TestTaskSchedulerLeaderRedisKey 验证调度 leader 锁 key 的默认值和归一规则。

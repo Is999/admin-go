@@ -3,7 +3,7 @@ package redsync
 import (
 	"context"
 	stderrors "errors"
-
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -22,15 +22,24 @@ var (
 )
 
 const (
-	// maxLockAcquireTimeout 限制整段加锁等待，避免 Redis 故障时等待时间随锁 TTL 放大。
-	maxLockAcquireTimeout = time.Second
+	// lockAcquireTries 包含首次立即请求和五次退避重试，持续竞争时最多向 Redis 发起六轮加锁。
+	lockAcquireTries = 6
+	// lockRetryStep 是相邻重试轮次增加的基础等待，五次基础等待依次为 100/200/300/400/500ms。
+	lockRetryStep = 100 * time.Millisecond
+	// maxLockRetryBaseDelay 把末轮基础等待限制在 500ms，避免竞争释放后仍长时间空等。
+	maxLockRetryBaseDelay = 500 * time.Millisecond
+	// maxLockRetryJitter 把同一轮竞争者随机打散到 100ms 窗口，同时把单轮最长等待限制在 600ms。
+	maxLockRetryJitter = 100 * time.Millisecond
+	// maxLockAcquireTimeout 覆盖最多 2s 纯退避并预留 Redis 请求时间，调用方更短的 deadline 仍优先生效。
+	maxLockAcquireTimeout = 3 * time.Second
 	// minLockOperationTimeout 是单次 Redis 锁操作的最短超时时间，避免小 TTL 场景下超时过短导致正常网络抖动被误判。
 	minLockOperationTimeout = 50 * time.Millisecond
 	// maxLockOperationTimeout 是单次 Redis 锁操作的最长超时时间，避免 Redis 异常时续期或释放动作长时间阻塞业务返回。
 	maxLockOperationTimeout = 500 * time.Millisecond
 )
 
-// Lock 封装基于 Redis 的分布式互斥锁，并支持后台自动续期。
+// Lock 封装基于一个 Redis 逻辑部署的分布式互斥锁，并支持后台自动续期。
+// 传入的 UniversalClient 只会适配为一个 redsync pool；Redis Cluster 的分片节点不等同于多套独立 Redis 主节点仲裁。
 // 单个 Lock 实例只用于一次加锁/释放生命周期。
 type Lock struct {
 	rs       *redsyncv4.Redsync // redsync 管理器，负责创建底层分布式互斥锁
@@ -61,8 +70,13 @@ func NewLock(redisClient redis.UniversalClient, key string) *Lock {
 	return lock
 }
 
-// TryLock 尝试获取锁；加锁成功后会自动续期，直到调用 Unlock 或续期失败。
+// TryLock 按全局有界退避策略获取锁；加锁成功后会自动续期，直到调用 Unlock 或续期失败。
 func (l *Lock) TryLock(ctx context.Context, ttl time.Duration) error {
+	return l.tryLock(ctx, ttl, false)
+}
+
+// tryLock 根据 singleAttempt 选择单次抢锁或有界退避，成功后的续期与释放生命周期保持一致。
+func (l *Lock) tryLock(ctx context.Context, ttl time.Duration, singleAttempt bool) error {
 	// 基础参数先校验，避免 nil Redis 客户端或非法 TTL 在 redsync 内部触发 panic 或异常行为。
 	if l == nil || l.rs == nil {
 		return errors.Errorf("Redis 锁未初始化")
@@ -84,23 +98,27 @@ func (l *Lock) TryLock(ctx context.Context, ttl time.Duration) error {
 	// mutex 是当前锁生命周期真正执行 Redis SETNX/PEXPIRE/DEL 等操作的底层互斥锁。
 	l.mutex = l.rs.NewMutex(l.key,
 		redsyncv4.WithExpiry(ttl),
-		redsyncv4.WithTries(5),
+		redsyncv4.WithTries(lockAcquireTries),
 		redsyncv4.WithRetryDelayFunc(func(tries int) time.Duration {
-			// 锁只保护短临界区，采用 20ms 起步的快速退避，避免接口长时间阻塞。
-			delay := 20 * time.Millisecond
-			if tries > 1 {
-				delay = delay << (tries - 1)
-			}
-			if delay > 200*time.Millisecond {
-				return 200 * time.Millisecond
-			}
-			return delay
+			// jitter 使用进程级并发安全随机源，让同一时刻失败的多个竞争者分散重试。
+			jitter := time.Duration(rand.Int64N(int64(maxLockRetryJitter) + 1))
+			return lockRetryDelay(tries, jitter)
 		}),
 	)
 
-	// acquireCtx 限制包含重试和退避在内的整段加锁等待，调用方更短的 deadline 仍优先生效。
-	acquireCtx, acquireCancel := context.WithTimeout(lockCtx, maxLockAcquireTimeout)
-	lockErr := l.mutex.LockContext(acquireCtx)
+	// acquireTimeout 限制本轮抢锁；单次模式只预留一个 Redis 操作窗口，有界退避模式覆盖全部五次等待。
+	acquireTimeout := maxLockAcquireTimeout
+	if singleAttempt {
+		acquireTimeout = lockOperationTimeout(ttl)
+	}
+	acquireCtx, acquireCancel := context.WithTimeout(lockCtx, acquireTimeout)
+	var lockErr error
+	if singleAttempt {
+		// TryLockContext 只执行一轮 SETNX，供冲突即跳过或转为观察结果的调用链使用。
+		lockErr = l.mutex.TryLockContext(acquireCtx)
+	} else {
+		lockErr = l.mutex.LockContext(acquireCtx)
+	}
 	acquireErr := acquireCtx.Err()
 	acquireCancel()
 	if lockErr != nil {
@@ -117,6 +135,23 @@ func (l *Lock) TryLock(ctx context.Context, ttl time.Duration) error {
 	// 加锁成功后再启动续期，避免未持锁时出现无意义的续期 goroutine。
 	go l.startRenewal(ttl)
 	return nil
+}
+
+// lockRetryDelay 计算指定重试轮次的线性等待；基础值达到 500ms 后不再增长，抖动被限制在 0–100ms。
+func lockRetryDelay(tries int, jitter time.Duration) time.Duration {
+	if tries < 1 {
+		tries = 1
+	}
+	base := time.Duration(tries) * lockRetryStep
+	if base > maxLockRetryBaseDelay {
+		base = maxLockRetryBaseDelay
+	}
+	if jitter < 0 {
+		jitter = 0
+	} else if jitter > maxLockRetryJitter {
+		jitter = maxLockRetryJitter
+	}
+	return base + jitter
 }
 
 // IsLockTaken 判断错误是否表示锁被其它节点持有。
@@ -284,8 +319,19 @@ func drainError(ch <-chan error) error {
 	return nil
 }
 
-// WithLock 在持有 Redis 分布式锁期间执行 fn。
+// WithLock 使用全局有界退避策略获取 Redis 锁，并在持锁期间执行 fn。
 func WithLock(ctx context.Context, redisClient redis.UniversalClient, key string, ttl time.Duration, fn func(context.Context) error) (err error) {
+	return withLock(ctx, redisClient, key, ttl, false, fn)
+}
+
+// WithLockOnce 只抢锁一次；锁已被占用时在单次抢锁轮次结束后报告 ErrLockTaken，不执行退避重试或 fn。
+// 该入口只用于冲突可直接跳过，或调用方会另行观察已有结果的链路；必须等待临界区的业务继续使用 WithLock。
+func WithLockOnce(ctx context.Context, redisClient redis.UniversalClient, key string, ttl time.Duration, fn func(context.Context) error) (err error) {
+	return withLock(ctx, redisClient, key, ttl, true, fn)
+}
+
+// withLock 复用抢锁后的续期、丢锁通知和 owner 校验释放流程，singleAttempt 只改变获取阶段。
+func withLock(ctx context.Context, redisClient redis.UniversalClient, key string, ttl time.Duration, singleAttempt bool, fn func(context.Context) error) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -295,7 +341,7 @@ func WithLock(ctx context.Context, redisClient redis.UniversalClient, key string
 
 	// 先获取锁，获取失败时不执行 fn，避免业务逻辑在无锁保护下运行。
 	lock := NewLock(redisClient, key)
-	if err := lock.TryLock(runCtx, ttl); err != nil {
+	if err := lock.tryLock(runCtx, ttl, singleAttempt); err != nil {
 		return errors.Tag(err)
 	}
 

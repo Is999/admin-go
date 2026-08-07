@@ -83,12 +83,12 @@ func TestFinishSysConfigTransaction(t *testing.T) {
 	commitErr := errors.New("提交失败")
 	rollbackErr := errors.New("回滚失败")
 	tests := []struct {
-		name        string
-		workErr     error
-		rollbackErr error
-		commitErr   error
-		wantOutcome sysConfigTxOutcome
-		wantErr     error
+		name        string             // name 标识当前事务收尾场景。
+		workErr     error              // workErr 模拟导入主体返回的错误。
+		rollbackErr error              // rollbackErr 模拟事务回滚结果不确定。
+		commitErr   error              // commitErr 模拟事务提交结果不确定。
+		wantOutcome sysConfigTxOutcome // wantOutcome 是消费标记允许采用的最终状态。
+		wantErr     error              // wantErr 是调用方必须收到的首要事务错误。
 	}{
 		{name: "提交成功", wantOutcome: sysConfigTxCommitted},
 		{name: "提交结果不确定", commitErr: commitErr, wantOutcome: sysConfigTxUncertain, wantErr: commitErr},

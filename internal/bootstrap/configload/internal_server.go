@@ -154,17 +154,20 @@ func internalConfigAddr(addr netip.Addr) bool {
 	return addr.IsLoopback() || addr.IsPrivate()
 }
 
+// internalConfigPrefixes 收口允许的回环和私网网段；使用类型安全地址构造，避免在运行期配置校验中调用可能 panic 的 MustParsePrefix。
+var internalConfigPrefixes = []netip.Prefix{
+	netip.PrefixFrom(netip.AddrFrom4([4]byte{127, 0, 0, 0}), 8),
+	netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 0, 0, 0}), 8),
+	netip.PrefixFrom(netip.AddrFrom4([4]byte{172, 16, 0, 0}), 12),
+	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 168, 0, 0}), 16),
+	netip.PrefixFrom(netip.AddrFrom16([16]byte{15: 1}), 128),
+	netip.PrefixFrom(netip.AddrFrom16([16]byte{0xfc}), 7),
+}
+
 // internalConfigPrefix 确保 CIDR 的完整地址范围都落在回环或私网网段。
 func internalConfigPrefix(prefix netip.Prefix) bool {
 	prefix = prefix.Masked()
-	for _, allowed := range []netip.Prefix{
-		netip.MustParsePrefix("127.0.0.0/8"),
-		netip.MustParsePrefix("10.0.0.0/8"),
-		netip.MustParsePrefix("172.16.0.0/12"),
-		netip.MustParsePrefix("192.168.0.0/16"),
-		netip.MustParsePrefix("::1/128"),
-		netip.MustParsePrefix("fc00::/7"),
-	} {
+	for _, allowed := range internalConfigPrefixes {
 		if prefix.Addr().BitLen() == allowed.Addr().BitLen() &&
 			prefix.Bits() >= allowed.Bits() &&
 			allowed.Contains(prefix.Addr()) {

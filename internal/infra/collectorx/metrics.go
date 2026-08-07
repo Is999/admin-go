@@ -5,12 +5,16 @@ import (
 	"sync"
 	"time"
 
+	"admin/common/prometheusx"
+
+	"github.com/Is999/go-utils/errors"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Collector 指标变量集中定义 Kafka 投递消费、失败账本、Processor 批量处理和结果统计。
 var (
 	collectorMetricsOnce sync.Once // 保证 Collector 指标只注册一次
+	collectorMetricsErr  error     // 保存启动期指标注册冲突，运行期记录遇到错误时直接跳过
 	// collectorMetricBizTypeGuard 保护 Collector biz_type 指标标签白名单。
 	collectorMetricBizTypeGuard = struct {
 		mu      sync.RWMutex        // 保护 biz_type label 集合，避免高基数维度无限增长
@@ -129,27 +133,46 @@ const (
 	collectorMetricBizTypeOther     = "other" // 超出上限或未知 bizType 统一归并到 other
 )
 
-// ensureMetricsRegistered 保证 Prometheus 指标只注册一次，避免测试和多实例初始化时重复注册 panic。
-func ensureMetricsRegistered() {
+// RegisterMetrics 注册 Collector 指标；同类型重复指标复用既有实例，冲突通过启动错误返回。
+func RegisterMetrics() error {
 	collectorMetricsOnce.Do(func() {
-		prometheus.MustRegister(
-			collectorKafkaPublishEventsTotal,
-			collectorKafkaConsumeEventsTotal,
-			collectorFailurePersistEventsTotal,
-			collectorFailurePersistDuration,
-			collectorFailureDeadEventsTotal,
-			collectorLeaseRenewTotal,
-			collectorProcessorBatchSize,
-			collectorProcessorBatchDuration,
-			collectorProcessorEventsTotal,
-			authSecurityEventsTotal,
-		)
+		if collectorKafkaPublishEventsTotal, collectorMetricsErr = prometheusx.Register(collectorKafkaPublishEventsTotal); collectorMetricsErr != nil {
+			return
+		}
+		if collectorKafkaConsumeEventsTotal, collectorMetricsErr = prometheusx.Register(collectorKafkaConsumeEventsTotal); collectorMetricsErr != nil {
+			return
+		}
+		if collectorFailurePersistEventsTotal, collectorMetricsErr = prometheusx.Register(collectorFailurePersistEventsTotal); collectorMetricsErr != nil {
+			return
+		}
+		if collectorFailurePersistDuration, collectorMetricsErr = prometheusx.Register(collectorFailurePersistDuration); collectorMetricsErr != nil {
+			return
+		}
+		if collectorFailureDeadEventsTotal, collectorMetricsErr = prometheusx.Register(collectorFailureDeadEventsTotal); collectorMetricsErr != nil {
+			return
+		}
+		if collectorLeaseRenewTotal, collectorMetricsErr = prometheusx.Register(collectorLeaseRenewTotal); collectorMetricsErr != nil {
+			return
+		}
+		if collectorProcessorBatchSize, collectorMetricsErr = prometheusx.Register(collectorProcessorBatchSize); collectorMetricsErr != nil {
+			return
+		}
+		if collectorProcessorBatchDuration, collectorMetricsErr = prometheusx.Register(collectorProcessorBatchDuration); collectorMetricsErr != nil {
+			return
+		}
+		if collectorProcessorEventsTotal, collectorMetricsErr = prometheusx.Register(collectorProcessorEventsTotal); collectorMetricsErr != nil {
+			return
+		}
+		authSecurityEventsTotal, collectorMetricsErr = prometheusx.Register(authSecurityEventsTotal)
 	})
+	return errors.Tag(collectorMetricsErr)
 }
 
 // recordLeaseRenew 记录所有权租约续期结果。
 func recordLeaseRenew(lease string, result string) {
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	collectorLeaseRenewTotal.WithLabelValues(
 		normalizeMetricLabel(lease, "unknown"),
 		normalizeMetricLabel(result, "unknown"),
@@ -206,7 +229,9 @@ func recordKafkaPublish(result string, count int) {
 	if count <= 0 {
 		return
 	}
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	collectorKafkaPublishEventsTotal.WithLabelValues(normalizeMetricLabel(result, "unknown")).Add(float64(count))
 }
 
@@ -215,7 +240,9 @@ func recordKafkaConsume(result string, count int) {
 	if count <= 0 {
 		return
 	}
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	collectorKafkaConsumeEventsTotal.WithLabelValues(normalizeMetricLabel(result, "unknown")).Add(float64(count))
 }
 
@@ -224,7 +251,9 @@ func recordFailurePersistBatch(state string, count int, duration time.Duration) 
 	if count <= 0 {
 		return
 	}
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	stateLabel := normalizeMetricLabel(state, "unknown")
 	collectorFailurePersistEventsTotal.WithLabelValues(stateLabel).Add(float64(count))
 	collectorFailurePersistDuration.WithLabelValues(stateLabel).Observe(duration.Seconds())
@@ -235,7 +264,9 @@ func recordFailureDead(bizType string, count int) {
 	if count <= 0 {
 		return
 	}
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	collectorFailureDeadEventsTotal.WithLabelValues(normalizeBizTypeMetricLabel(bizType)).Add(float64(count))
 }
 
@@ -244,7 +275,9 @@ func recordProcessorBatch(bizType string, batchSize int, successCount int, failC
 	if batchSize <= 0 {
 		return
 	}
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	label := normalizeBizTypeMetricLabel(bizType)
 	collectorProcessorBatchSize.WithLabelValues(label).Observe(float64(batchSize))
 	result := "success"
@@ -265,7 +298,9 @@ func recordProcessorBatch(bizType string, batchSize int, successCount int, failC
 
 // recordAuthSecurityEvent 记录认证风控事件聚合指标。
 func recordAuthSecurityEvent(appID string, action string, reason string) {
-	ensureMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	normalizedReason := normalizeAuthSecurityReason(reason)
 	authSecurityEventsTotal.WithLabelValues(
 		normalizeAuthSecurityAppID(appID),

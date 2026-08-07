@@ -33,8 +33,8 @@ const (
 	xdbVectorEnd = xdb.HeaderInfoLength + xdb.VectorIndexRows*xdb.VectorIndexCols*xdb.VectorIndexSize
 )
 
-// carrierGradeNATPrefix 是运营商级 NAT 共享地址段，不应送入公网归属地库。
-var carrierGradeNATPrefix = netip.MustParsePrefix("100.64.0.0/10")
+// carrierGradeNATPrefix 是运营商级 NAT 共享地址段；显式构造地址，避免 MustParsePrefix 在包初始化阶段触发不可恢复 panic。
+var carrierGradeNATPrefix = netip.PrefixFrom(netip.AddrFrom4([4]byte{100, 64, 0, 0}), 10)
 
 // Locator 封装 ip2region 的并发安全查询服务。
 type Locator struct {

@@ -5,6 +5,9 @@ import (
 	"sync"
 	"time"
 
+	"admin/common/prometheusx"
+
+	"github.com/Is999/go-utils/errors"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -13,6 +16,7 @@ const idgenMetricNamespace = "admin"
 
 var (
 	idgenMetricsOnce sync.Once // idgenMetricsOnce 保证 ID 指标只注册一次
+	idgenMetricsErr  error     // idgenMetricsErr 保存启动期指标注册冲突，运行期记录遇到错误时直接跳过
 
 	// 记录 ID 生成结果总量，标签为业务 namespace、策略和结果。
 	idgenGeneratedTotal = prometheus.NewCounterVec(
@@ -78,23 +82,34 @@ var (
 	)
 )
 
-// ensureIDMetricsRegistered 保证 ID 指标只注册一次。
-func ensureIDMetricsRegistered() {
+// RegisterMetrics 注册 ID 指标；同类型重复指标复用既有实例，冲突通过启动错误返回。
+func RegisterMetrics() error {
 	idgenMetricsOnce.Do(func() {
-		prometheus.MustRegister(
-			idgenGeneratedTotal,
-			idgenGenerateDuration,
-			idgenSegmentAllocationsTotal,
-			idgenSegmentAllocationDuration,
-			idgenSegmentRemaining,
-			idgenSnowflakeLeaseEventsTotal,
-		)
+		if idgenGeneratedTotal, idgenMetricsErr = prometheusx.Register(idgenGeneratedTotal); idgenMetricsErr != nil {
+			return
+		}
+		if idgenGenerateDuration, idgenMetricsErr = prometheusx.Register(idgenGenerateDuration); idgenMetricsErr != nil {
+			return
+		}
+		if idgenSegmentAllocationsTotal, idgenMetricsErr = prometheusx.Register(idgenSegmentAllocationsTotal); idgenMetricsErr != nil {
+			return
+		}
+		if idgenSegmentAllocationDuration, idgenMetricsErr = prometheusx.Register(idgenSegmentAllocationDuration); idgenMetricsErr != nil {
+			return
+		}
+		if idgenSegmentRemaining, idgenMetricsErr = prometheusx.Register(idgenSegmentRemaining); idgenMetricsErr != nil {
+			return
+		}
+		idgenSnowflakeLeaseEventsTotal, idgenMetricsErr = prometheusx.Register(idgenSnowflakeLeaseEventsTotal)
 	})
+	return errors.Tag(idgenMetricsErr)
 }
 
 // recordIDGenerate 记录单次 ID 生成结果。
 func recordIDGenerate(namespace string, strategy string, err error, elapsed time.Duration) {
-	ensureIDMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	result := "success"
 	if err != nil {
 		result = "failed"
@@ -105,14 +120,18 @@ func recordIDGenerate(namespace string, strategy string, err error, elapsed time
 
 // RecordSegmentAllocation 记录 Redis Segment 号段分配结果。
 func RecordSegmentAllocation(namespace string, result string, elapsed time.Duration) {
-	ensureIDMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	idgenSegmentAllocationsTotal.WithLabelValues(metricLabel(namespace), metricLabel(result)).Inc()
 	idgenSegmentAllocationDuration.WithLabelValues(metricLabel(namespace), metricLabel(result)).Observe(elapsed.Seconds())
 }
 
 // RecordSegmentRemaining 记录当前进程本地 Segment 剩余容量。
 func RecordSegmentRemaining(namespace string, remaining int64) {
-	ensureIDMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -121,7 +140,9 @@ func RecordSegmentRemaining(namespace string, remaining int64) {
 
 // RecordSnowflakeLeaseEvent 记录 Snowflake Redis 租约事件。
 func RecordSnowflakeLeaseEvent(namespace string, event string) {
-	ensureIDMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	idgenSnowflakeLeaseEventsTotal.WithLabelValues(metricLabel(namespace), metricLabel(event)).Inc()
 }
 

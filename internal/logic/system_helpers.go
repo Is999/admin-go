@@ -22,6 +22,14 @@ func FormatDateTime(t time.Time) string {
 	return t.Format(time.DateTime)
 }
 
+// FormatOptionalDateTime 把可空数据库时间转换成前端日期时间；nil 表示业务事件从未发生，返回空字符串。
+func FormatOptionalDateTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return FormatDateTime(*t)
+}
+
 // BuildTreePids 根据父级 ID 和父级族谱生成当前节点族谱。
 func BuildTreePids(parentID int, parentPids string) string {
 	if parentID <= 0 {

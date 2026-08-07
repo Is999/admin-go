@@ -61,10 +61,8 @@ func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 			position := fileSet.Position(call.Pos())
 			switch target := call.Fun.(type) {
 			case *ast.Ident:
-				if target.Name == "panic" {
-					if _, allowed := allowedMustCalls[call.Pos()]; !allowed {
-						t.Errorf("运行路径禁止 panic: %s:%d", relPath, position.Line)
-					}
+				if isFatalIdentifier(target) {
+					t.Errorf("生产代码禁止不可恢复调用 %s: %s:%d", target.Name, relPath, position.Line)
 				}
 			case *ast.SelectorExpr:
 				if isFatalSelector(target) {
@@ -135,7 +133,8 @@ var initialized = func() int { panic("build asset"); return 1 }()
 	}
 }
 
-// commandMainExitCalls 只放行 cmd 主函数直接执行的退出候选；仍需沿主调用链确认服务尚未监听或已完整停机并清理资源。
+// commandMainExitCalls 只放行 cmd 主函数同步直接执行的退出语句；go、defer、闭包和嵌套表达式仍视为运行期致命调用。
+// 该静态检查不证明资源生命周期正确，实际入口仍须确认服务未监听，或监听器和后台组件已经停止并完成清理。
 func commandMainExitCalls(file *ast.File, relPath string, imports map[string]string) map[token.Pos]struct{} {
 	positions := make(map[token.Pos]struct{})
 	if file.Name.Name != "main" || !strings.HasPrefix(relPath, "cmd/") {
@@ -147,11 +146,15 @@ func commandMainExitCalls(file *ast.File, relPath string, imports map[string]str
 			continue
 		}
 		ast.Inspect(function.Body, func(node ast.Node) bool {
-			// 保存到变量或异步执行的闭包不属于主函数直接退出边界。
+			// 闭包拥有独立运行边界，其内部退出调用不能借外层 main 获得例外。
 			if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
 				return false
 			}
-			call, ok := node.(*ast.CallExpr)
+			statement, ok := node.(*ast.ExprStmt)
+			if !ok {
+				return true
+			}
+			call, ok := statement.X.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
@@ -213,26 +216,47 @@ func runtimePath() { _ = re.MustCompile("runtime"); run.Goexit(); sys.Exit(1) }
 
 	mainFile, err := parser.ParseFile(fileSet, "cmd/example/main.go", `package main
 import process "os"
-func main() { process.Exit(1) }
+func main() {
+    process.Exit(1)
+    if true { process.Exit(2) }
+    go process.Exit(3)
+    defer process.Exit(4)
+    func() { process.Exit(5) }()
+}
 func helper() { process.Exit(1) }
 `, 0)
 	if err != nil {
 		t.Fatalf("解析命令入口测试源码失败: %v", err)
 	}
-	if got := len(commandMainExitCalls(mainFile, "cmd/example/main.go", importPathByAlias(mainFile))); got != 1 {
-		t.Fatalf("允许的命令入口退出调用数量 = %d，期望 1", got)
+	if got := len(commandMainExitCalls(mainFile, "cmd/example/main.go", importPathByAlias(mainFile))); got != 2 {
+		t.Fatalf("允许的命令入口同步直接退出调用数量 = %d，期望 2", got)
 	}
 
-	for _, name := range []string{"Fatal", "Fatalw", "Panic", "Panicw", "MustCompile", "MustRegister"} {
+	for _, name := range []string{"panic", "Fatal", "Fatalw", "Panic", "Panicw", "MustCompile", "MustRegister"} {
+		if !isFatalIdentifier(ast.NewIdent(name)) {
+			t.Fatalf("未识别直接致命调用名称 %s", name)
+		}
+		if name == "panic" {
+			continue
+		}
 		if !isFatalSelector(&ast.SelectorExpr{Sel: ast.NewIdent(name)}) {
 			t.Fatalf("未识别致命调用名称 %s", name)
 		}
 	}
 }
 
+// isFatalIdentifier 识别同包函数或函数变量形式的致命调用，避免其绕过选择器检查。
+func isFatalIdentifier(identifier *ast.Ident) bool {
+	return identifier.Name == "panic" || isFatalName(identifier.Name)
+}
+
 // isFatalSelector 识别会直接终止进程或在重复指标注册时触发 panic 的调用。
 func isFatalSelector(selector *ast.SelectorExpr) bool {
-	name := selector.Sel.Name
+	return isFatalName(selector.Sel.Name)
+}
+
+// isFatalName 统一判断函数名是否表达不可恢复的退出或 panic 语义。
+func isFatalName(name string) bool {
 	return strings.HasPrefix(name, "Fatal") || strings.HasPrefix(name, "Panic") || strings.HasPrefix(name, "Must")
 }
 

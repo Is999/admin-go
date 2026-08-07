@@ -3,7 +3,6 @@ package types
 import (
 	"bytes"
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	utils "github.com/Is999/go-utils"
@@ -72,9 +71,4 @@ func normalizeRequestJSONValue(value any, allowEmpty bool) (json.RawMessage, err
 		return nil, errors.Errorf("配置值不能为空")
 	}
 	return raw, nil
-}
-
-// MustJSONNumber 把整数字符串格式化成 JSON 数字。
-func MustJSONNumber(v int) json.RawMessage {
-	return json.RawMessage(strconv.Itoa(v))
 }

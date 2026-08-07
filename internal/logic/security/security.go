@@ -521,13 +521,13 @@ func adminForAccess(session *types.AdminSession) (*model.Admin, error) {
 	if session == nil || session.ID <= 0 {
 		return nil, ErrAdminNotFound
 	}
-	var lastLoginTime time.Time
+	var lastLoginTime *time.Time
 	if value := strings.TrimSpace(session.LastLoginTime); value != "" {
 		parsed, err := time.ParseInLocation(time.DateTime, value, time.Local)
 		if err != nil {
 			return nil, errors.Wrap(err, "解析管理员登录态最后登录时间失败")
 		}
-		lastLoginTime = parsed
+		lastLoginTime = &parsed
 	}
 	return &model.Admin{
 		ID:                session.ID,

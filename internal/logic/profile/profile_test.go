@@ -215,11 +215,12 @@ func TestMarkLoginMFACompletedAfterEnable(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	svcCtx := svc.NewServiceContext(config.Config{AppID: "site-a"}, svc.Dependencies{Rds: client})
 	logicObj := securitylogic.NewSecurityLogic(context.Background(), svcCtx)
+	lastLoginTime := time.Now()
 	admin := &model.Admin{
 		ID:            2,
 		Name:          "admin999",
 		MfaStatus:     1,
-		LastLoginTime: time.Now(),
+		LastLoginTime: &lastLoginTime,
 	}
 	if err := logicObj.MarkLoginMFACompleted(admin.ID); err != nil {
 		t.Fatalf("MarkLoginMFACompleted failed: %v", err)

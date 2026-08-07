@@ -356,7 +356,7 @@ func BuildAdminSession(admin *model.Admin, token string) *types.AdminSession {
 		Status:            admin.Status,
 		Avatar:            admin.Avatar,
 		Description:       admin.Description,
-		LastLoginTime:     corelogic.FormatDateTime(admin.LastLoginTime),
+		LastLoginTime:     corelogic.FormatOptionalDateTime(admin.LastLoginTime),
 		LastLoginIP:       admin.LastLoginIP,
 		LastLoginIPAddr:   admin.LastLoginIPAddr,
 		Token:             token,

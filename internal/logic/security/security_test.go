@@ -415,7 +415,7 @@ func TestAdminForAccessUsesVerifiedSession(t *testing.T) {
 	if admin.ID != 7 || admin.Name != "admin007" || admin.Status != 1 || admin.MfaStatus != 1 {
 		t.Fatalf("adminForAccess() admin=%+v", admin)
 	}
-	if !admin.LastLoginTime.Equal(lastLoginTime) || admin.MfaSecureKey != adminAccessMFASecretUnknown {
+	if admin.LastLoginTime == nil || !admin.LastLoginTime.Equal(lastLoginTime) || admin.MfaSecureKey != adminAccessMFASecretUnknown {
 		t.Fatalf("adminForAccess() session state=%+v", admin)
 	}
 }

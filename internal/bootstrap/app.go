@@ -62,11 +62,16 @@ type App struct {
 	taskRedisOwned bool                        // 当前 App 是否负责关闭 taskRedis
 	hotReload      hotreload.State             // 配置热加载运行态资源
 	runtimeConfig  runtimewatch.State          // DB 运行配置热加载运行态资源
+	publicHTTP     *httpServerRun              // 公网监听器运行态，用于启动探测和局部失败关闭
+	internalHTTP   *httpServerRun              // 内网监听器运行态，用于启动探测和局部失败关闭
 }
 
 // New 负责把依赖装配与 HTTP 服务注册串起来，并支持通过可选参数注入外部任务插件。
 func New(ctx context.Context, c config.Config, mode int, options ...Option) (*App, error) {
 	configload.Normalize(&c)
+	if err := i18n.ValidateCatalog(); err != nil {
+		return nil, errors.Wrap(err, "校验内嵌多语言资产失败")
+	}
 	if err := idgen.RegisterMetrics(); err != nil {
 		return nil, errors.Wrap(err, "注册 ID 生成指标失败")
 	}
@@ -114,6 +119,10 @@ func New(ctx context.Context, c config.Config, mode int, options ...Option) (*Ap
 		shutdown:       shutdown,
 		taskRedis:      runtimeSnapshot.TaskRedis,
 		taskRedisOwned: runtimeSnapshot.TaskRedisOwned,
+	}
+	if app.Server != nil {
+		app.publicHTTP = newHTTPServerRun("公网", c.Host, c.Port, app.Server)
+		app.internalHTTP = newHTTPServerRun("内网", c.InternalServer.Host, c.InternalServer.Port, app.InternalServer)
 	}
 	// 启动快照已应用，先初始化 watcher 水位，避免首次轮询重复加载同一版本。
 	app.runtimeConfig.MarkApplied(startupRuntimeConfig.VersionNo, startupRuntimeConfig.Checksum)
@@ -198,18 +207,22 @@ func (a *App) Start() error {
 	// 启动 HTTP 服务
 	if a.Server != nil {
 		if a.InternalServer == nil {
-			return errors.New("内网 HTTP 服务未初始化")
+			err := errors.New("内网 HTTP 服务未初始化")
+			a.notifyLifecycleFailure(context.Background(), "start", "http_server", err)
+			return err
 		}
 		cfg := a.CurrentConfig()
-		loggerx.Infow(context.Background(), "应用 服务已启动",
+		loggerx.Infow(context.Background(), "应用 HTTP 服务开始监听",
 			logx.Field("service", a.displayName()),
 			logx.Field("host", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)),
 			logx.Field("internal_host", fmt.Sprintf("%s:%d", cfg.InternalServer.Host, cfg.InternalServer.Port)),
 			logx.Field("mode", runmode.Format(a.Mode)),
 		)
-		go startHTTPServer(a.InternalServer, httpDrainTimeout)
-		startHTTPServer(a.Server, httpDrainTimeout)
-		return nil
+		err := runHTTPServers([]*httpServerRun{a.internalHTTP, a.publicHTTP}, httpDrainTimeout)
+		if err != nil {
+			a.notifyLifecycleFailure(context.Background(), "start", "http_server", err)
+		}
+		return errors.Tag(err)
 	}
 
 	// 启动后台运行时
@@ -219,15 +232,6 @@ func (a *App) Start() error {
 	)
 	waitForSignal()
 	return nil
-}
-
-// startHTTPServer 启动 HTTP 服务，并为框架的无期限请求排空增加上限。
-func startHTTPServer(server *rest.Server, drainTimeout time.Duration) {
-	drainDone := make(chan struct{})
-	defer close(drainDone)
-	server.StartWithOpts(func(httpServer *http.Server) {
-		limitHTTPDrain(httpServer, drainTimeout, drainDone)
-	})
 }
 
 // limitHTTPDrain 到期后关闭仍未结束的连接，确保后续资源关闭可以继续执行。
@@ -256,17 +260,18 @@ func (a *App) Stop(ctx context.Context) error {
 	}
 
 	// 先停止 HTTP 服务入口，避免关闭过程中继续接收新请求。
-	if a.Server != nil {
-		a.Server.Stop()
-	}
-	if a.InternalServer != nil {
-		a.InternalServer.Stop()
-	}
 	var firstErr error
 	recordErr := func(err error) {
 		if err != nil && firstErr == nil {
 			firstErr = errors.Tag(err)
 		}
+	}
+	recordErr(shutdownHTTPServers(ctx, a.publicHTTP, a.internalHTTP))
+	if a.Server != nil {
+		a.Server.Stop()
+	}
+	if a.InternalServer != nil {
+		a.InternalServer.Stop()
 	}
 	// 再停止配置热加载协程，避免资源释放过程中仍有后台线程刷新配置快照。
 	recordErr(a.stopConfigHotReload(ctx))

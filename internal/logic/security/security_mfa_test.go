@@ -498,7 +498,7 @@ func TestCheckAdminMFAToleratesOneSecondSkew(t *testing.T) {
 		Name:          "super999",
 		MfaSecureKey:  adminAccessMFASecretUnknown,
 		MfaStatus:     1,
-		LastLoginTime: lastLoginTime,
+		LastLoginTime: &lastLoginTime,
 	}
 	cacheKey := logicObj.loginMFAFlagKey(admin.ID)
 	if err := client.Set(context.Background(), cacheKey, lastLoginTime.Unix()-1, time.Minute).Err(); err != nil {

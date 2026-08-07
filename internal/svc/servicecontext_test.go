@@ -42,6 +42,25 @@ func TestScopedWithContextReusesRedisLimiter(t *testing.T) {
 	}
 }
 
+// TestScopedWithContextReusesTableCacheStore 验证请求作用域共享已确认的 Redis 拓扑，避免重复执行 CLUSTER INFO。
+func TestScopedWithContextReusesTableCacheStore(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	svcCtx := NewServiceContext(config.Config{AppID: "site-a"}, Dependencies{Rds: client})
+	if svcCtx.TableCacheStore == nil {
+		t.Fatal("ServiceContext 未自动初始化进程级 TableCacheStore")
+	}
+	scoped := svcCtx.ScopedWithContext(context.Background())
+	if scoped == nil || scoped.TableCacheStore != svcCtx.TableCacheStore {
+		t.Fatal("请求作用域必须复用进程级 TableCacheStore 指针")
+	}
+	if withoutRedis := NewServiceContext(config.Config{AppID: "site-a"}, Dependencies{}); withoutRedis.TableCacheStore != nil {
+		t.Fatal("缺少 Redis 客户端时不应创建 TableCacheStore")
+	}
+}
+
 // TestNewServiceContextPreservesInjectedRedisLimiter 验证显式注入优先且缺少 Redis 时不创建空组件。
 func TestNewServiceContextPreservesInjectedRedisLimiter(t *testing.T) {
 	server := miniredis.RunT(t)

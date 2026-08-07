@@ -23,6 +23,10 @@ const (
 	redisCommandEvalSHARO = "evalsha_ro"
 	// redisNoScriptPrefix 表示 Redis 脚本缓存缺失错误前缀，后续会由 go-redis 自动回退到 EVAL。
 	redisNoScriptPrefix = "NOSCRIPT"
+	// redisCommandClusterInfo 表示 table-cache 用单节点客户端确认实际 Redis 拓扑的探测命令。
+	redisCommandClusterInfo = "cluster info"
+	// redisClusterDisabledMessage 表示 Redis 单机模式对 CLUSTER INFO 的标准拒绝响应，该结果确认拓扑而非业务失败。
+	redisClusterDisabledMessage = "cluster support disabled"
 )
 
 // New 创建 Redis 客户端，并注册统一的命令耗时/错误日志 hook。
@@ -329,11 +333,22 @@ func (h hook) logProcess(ctx context.Context, duration time.Duration, err error,
 		// EVALSHA 的 NOSCRIPT 是脚本内容变更、Redis 重启或脚本缓存清理后的正常回退路径。
 		// go-redis Script.Run 会继续执行 EVAL，这里避免把中间态误报为业务错误。
 		return
+	case isRedisStandaloneTopologyProbe(err, cmd):
+		// table-cache 会缓存该拓扑结论，单机 Redis 的标准拒绝响应不应污染错误日志。
+		return
 	case err != nil && !errors.Is(err, redis.Nil):
 		loggerx.Errorw(ctx, "缓存 命令执行失败", err, fields...)
 	case h.slowThreshold > 0 && duration > h.slowThreshold:
 		loggerx.Sloww(ctx, "缓存 命令耗时较高", fields...)
 	}
+}
+
+// isRedisStandaloneTopologyProbe 判断 CLUSTER INFO 是否以标准响应确认当前节点为非 Cluster Redis。
+func isRedisStandaloneTopologyProbe(err error, cmd redis.Cmder) bool {
+	if err == nil || cmd == nil || !strings.EqualFold(strings.TrimSpace(cmd.FullName()), redisCommandClusterInfo) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), redisClusterDisabledMessage)
 }
 
 // isRedisScriptCacheMiss 判断当前错误是否为 Redis 脚本缓存未命中。

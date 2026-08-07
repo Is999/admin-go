@@ -929,7 +929,7 @@ func buildAdminExportRows(admins []model.Admin, roleMap map[int][]types.AdminRol
 				adminNeedResetPasswordText(admin.NeedResetPassword),
 				strings.Join(roleIDs, ","),
 				strings.Join(roleTitles, ","),
-				corelogic.FormatDateTime(admin.LastLoginTime),
+				corelogic.FormatOptionalDateTime(admin.LastLoginTime),
 				admin.LastLoginIP,
 				admin.LastLoginIPAddr,
 				corelogic.FormatDateTime(admin.CreatedAt),

@@ -166,7 +166,7 @@ func (l *AdminBootstrapLogic) resetBootstrapAdminTx(tx *gorm.DB, admin *model.Ad
 		"status":              1,
 		"avatar":              chooseBootstrapString(req.Avatar, admin.Avatar),
 		"description":         chooseBootstrapString(req.Description, admin.Description),
-		"last_login_time":     time.Time{},
+		"last_login_time":     nil,
 		"last_login_ip":       "",
 		"last_login_ipaddr":   "",
 		"updated_at":          time.Now(),
@@ -185,7 +185,7 @@ func (l *AdminBootstrapLogic) resetBootstrapAdminTx(tx *gorm.DB, admin *model.Ad
 	admin.Status = 1
 	admin.Avatar = chooseBootstrapString(req.Avatar, admin.Avatar)
 	admin.Description = chooseBootstrapString(req.Description, admin.Description)
-	admin.LastLoginTime = time.Time{}
+	admin.LastLoginTime = nil
 	admin.LastLoginIP = ""
 	admin.LastLoginIPAddr = ""
 	admin.UpdatedAt = time.Now()

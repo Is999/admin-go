@@ -253,6 +253,49 @@ func TestIsRedisScriptCacheMiss(t *testing.T) {
 	}
 }
 
+// TestIsRedisStandaloneTopologyProbe 验证只有单机 Redis 对 CLUSTER INFO 的标准响应被归类为预期拓扑探测。
+func TestIsRedisStandaloneTopologyProbe(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  redis.Cmder
+		err  error
+		want bool
+	}{
+		{
+			name: "standalone response",
+			cmd:  redis.NewCmd(context.Background(), "cluster", "info"),
+			err:  stderrors.New("ERR This instance has cluster support disabled"),
+			want: true,
+		},
+		{
+			name: "cluster failure",
+			cmd:  redis.NewCmd(context.Background(), "cluster", "info"),
+			err:  stderrors.New("CLUSTERDOWN The cluster is down"),
+		},
+		{
+			name: "other command",
+			cmd:  redis.NewCmd(context.Background(), "get", "key"),
+			err:  stderrors.New("ERR This instance has cluster support disabled"),
+		},
+		{
+			name: "nil error",
+			cmd:  redis.NewCmd(context.Background(), "cluster", "info"),
+		},
+		{
+			name: "nil command",
+			err:  stderrors.New("ERR This instance has cluster support disabled"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRedisStandaloneTopologyProbe(tt.err, tt.cmd); got != tt.want {
+				t.Fatalf("isRedisStandaloneTopologyProbe() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestNewPingsRedisAtStartup 确保 Redis 客户端创建阶段会完成联通性探测。
 func TestNewPingsRedisAtStartup(t *testing.T) {
 	// server 提供一个真实可 PING 的 Redis 单节点，验证 New 能完成启动探测。

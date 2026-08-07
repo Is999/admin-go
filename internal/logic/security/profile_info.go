@@ -55,7 +55,7 @@ func (l *SecurityLogic) BuildProfileInfo(admin *model.Admin, token string) (*typ
 		MFABindRequired:   needBindMFA,
 		Avatar:            admin.Avatar,
 		Description:       admin.Description,
-		LastLoginTime:     corelogic.FormatDateTime(admin.LastLoginTime),
+		LastLoginTime:     corelogic.FormatOptionalDateTime(admin.LastLoginTime),
 		LastLoginIP:       admin.LastLoginIP,
 		LastLoginAddr:     admin.LastLoginIPAddr,
 		CreatedAt:         corelogic.FormatDateTime(admin.CreatedAt),

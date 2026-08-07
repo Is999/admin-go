@@ -1,4 +1,4 @@
 interface:
   display_name: "API 契约同步"
-  short_description: "同步路由、业务码、文档和前端类型。"
-  default_prompt: "使用 $api-contract-sync 检查这次 API 改动是否同步了路由、业务码、文档和前端契约。"
+  short_description: "同步后端路由、请求响应、业务码、安全字段、接口文档与前端契约。"
+  default_prompt: "使用 $api-contract-sync 沿源码识别这次 API 变更触发的契约面，并逐项同步和验证。"

@@ -92,10 +92,19 @@ func TestDocsResourceForAssetPath(t *testing.T) {
 	}
 }
 
+// TestDocsResourceForAPIHomepage 验证 API 独立首页使用精确正文权限，而不是只依赖入口权限。
+func TestDocsResourceForAPIHomepage(t *testing.T) {
+	got, ok := DocsResourceForAssetPath("api", "文档首页.md")
+	want := DocResource{Site: DocSiteAPI, Path: "文档首页.md"}
+	if !ok || got != want {
+		t.Fatalf("DocsResourceForAssetPath() = (%+v, %t), want (%+v, true)", got, ok, want)
+	}
+}
+
 // TestDocsResourcesMatchWorkspace 确保两个仓库的 Markdown 文档都纳入精确权限清单。
 func TestDocsResourcesMatchWorkspace(t *testing.T) {
 	adminRoot := routealiasTestAdminRoot(t)
-	apiRoot := routealiasTestSiblingRoot(t, adminRoot, "api")
+	apiRoot := routealiasTestSiblingRoot(t, adminRoot, "api-go")
 	got := docResourceKeys(DocsResources())
 	want := docResourceKeys(append(
 		workspaceDocsResources(t, filepath.Join(adminRoot, "docs/site"), DocSiteAdmin),

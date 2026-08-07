@@ -16,10 +16,15 @@ MaxBytes: 52428800
 
 # DNMP 开发环境内网接口独立监听器；端口只应在容器网络内暴露。
 internal_server:
+  # 内网路由监听 IP；DNMP 使用容器通配地址，生产禁止通配地址，变更后必须重启。
   host: "0.0.0.0"
+  # 内网路由监听端口，取值 1-65535 且不能与公网 Port 相同，变更后必须重启。
   port: 8898
+  # mTLS 服务端证书文件；与 key_file、client_ca_file 同时为空或同时配置，DNMP 容器内 HTTP 可留空，变更后必须重启。
   cert_file: ""
+  # mTLS 服务端私钥文件；必须与 cert_file、client_ca_file 成组配置，文件内容不得写入 YAML 或日志，变更后必须重启。
   key_file: ""
+  # mTLS 客户端 CA 文件；配置后内网监听器强制校验客户端证书，必须与 cert_file、key_file 成组配置，变更后必须重启。
   client_ca_file: ""
 
 # 启动模式位掩码：1=api，2=worker，4=scheduler，可组合。
@@ -131,14 +136,20 @@ api_service:
   ops_token: "dnmp-local-ops-token"
   # API 内网调用超时秒数。
   timeout_seconds: 5
+  # API 服务端 CA 文件；HTTPS 时必须与 cert_file、key_file 同时配置，DNMP 容器内 HTTP 必须留空。
   ca_file: ""
+  # Admin mTLS 客户端证书文件；HTTPS 时必须与 ca_file、key_file 成组配置，DNMP 容器内 HTTP 必须留空。
   cert_file: ""
+  # Admin mTLS 客户端私钥文件；HTTPS 时必须与 ca_file、cert_file 成组配置，私钥内容不得写入 YAML 或日志。
   key_file: ""
+  # API 服务端证书名称；HTTPS 留空时使用 internal_base_url 的主机名，DNMP 容器内 HTTP 不读取该值。
   server_name: ""
 
 # admin 内网接口令牌和来源白名单；请求还会执行 HMAC 与 Redis nonce 防重放。
 ops:
+  # DNMP 内网令牌兼作 HMAC 密钥，去除首尾空白后至少 16 字符；仅供本地示例，部署前必须替换。
   token: "dnmp-local-admin-ops-token"
+  # 允许来源的回环/私网 IP 或 CIDR；空列表允许所有回环和私网来源，非空时进一步收窄，公网地址会导致启动失败。
   allowed_ips: []
 
 # 本地 IP 归属地解析；IPv4/IPv6 XDB 会完整读入内存且合计上限 128 MiB，替换后需滚动重启实例。
@@ -172,9 +183,9 @@ file_storage:
     bucket: ""
     # 区域。
     region: "ap-southeast-1"
-    # AccessKey。
+    # S3 访问身份标识；与 secret_key 必须同时为空或同时配置，启用 S3 时由目标环境密钥渠道注入，轮换后重启进程。
     access_key: ""
-    # SecretKey。
+    # S3 访问密钥；与 access_key 必须同时为空或同时配置，样例禁止写入真实值，轮换后重启进程。
     secret_key: ""
     # 自定义访问域名。
     domain: ""
@@ -249,7 +260,7 @@ redis:
     - "127.0.0.1:7004"
     - "127.0.0.1:7005"
     - "127.0.0.1:7006"
-  # Redis Cluster 地址改写示例。
+  # Redis Cluster 地址改写表；key 为唯一的节点公告主机名，value 为当前进程可达主机/IP，条目顺序无意义；空表不改写，仅 cluster 模式允许配置，且不与外置运行期配置合并。
   addr_map:
     redis-cluster-7001: "127.0.0.1"
     redis-cluster-7002: "127.0.0.1"
@@ -332,7 +343,7 @@ collector:
   tasks:
     # 管理员审计日志按 200 条或 3 秒触发一次批量入库。
     admin_log.audit:
-      # Kafka Topic。
+      # 管理员审计事件 Kafka Topic；必须与生产端 admin_log.audit 映射一致，修改后重启 Collector 消费进程。
       topic: "admin_collector_admin_log_events"
       # Kafka 消费组；同 Topic 下任务必须保持一致。
       group_id: "admin_collector_admin_log"
@@ -344,7 +355,7 @@ collector:
       idempotency_enabled: true
     # 前台 API 认证风控事件按 500 条或 2 秒触发一次指标聚合。
     auth.security:
-      # Kafka Topic。
+      # API 认证风控事件 Kafka Topic；必须与 API 生产端 auth.security 映射一致，修改后重启 Collector 消费进程。
       topic: "api_collector_auth_security_events"
       # Kafka 消费组；同 Topic 下任务必须保持一致。
       group_id: "admin_collector_auth_security"

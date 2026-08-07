@@ -1,20 +1,30 @@
 ---
 name: release-handoff-guard
-description: "准备最终交付和交接。用于完成前检查验证、git status、staged 文件，以及迁移、回填、缓存失效、重启、回滚、补偿说明。"
+description: "收口最终交付与运维交接。用于核对验证快照、Git 状态、staged 文件，以及迁移、回填、缓存失效、重启、回滚和补偿说明。"
 ---
 
 # 交付收口护栏
 
-## 工作流程
+## 执行流程
 
-1. 回放最新用户需求，确认最终 diff 与需求一致。
-2. 每个触达 Git 仓库都检查 `git status --short`，区分 staged、unstaged、untracked 和已有无关改动。
-3. 仓库规则要求时，只暂存本轮交付文件；不要暂存无关用户改动、本地数据目录、构建产物或历史未跟踪文件。
-4. 运行 `git diff --check`；存在 staged 文件时，再运行 `git diff --cached --check`。
-5. 确认必需验证命令已运行；跳过时要说明准确原因。
-6. 识别运维后续：data migration、backfill、cache invalidation、config reload、process restart、feature flag、rollback、compensation 或人工发布步骤。
-7. 最终回复保持诚实，已完成、已验证、已跳过、被阻塞和需要后续处理的事项要分开说明。
+1. 回放用户最新需求，确认最终 diff 与已确认边界一致。
+2. 在每个触达仓库检查 `git status --short`，区分 staged、unstaged、untracked 和已有无关改动。
+3. 只暂存本轮交付文件；排除用户无关改动、本地数据、密钥、构建产物和历史未跟踪文件。
+4. 涉及 DDL/DML 时，确认候选版本只包含完整初始化基线，未新增碎片化迁移 SQL 或日常迁移版本；用 `git check-ignore` 证明 `data/sql-changes/<change-id>/` 本地变更包被忽略。
+5. 最终暂存后冻结编辑，确认任务文件没有 `MM`、unstaged 或 untracked 漂移。
+6. 运行 `git diff --check`；存在 staged 文件时运行 `git diff --cached --check`。
+7. 候选版本包含项目自有 YAML 时，确认固定字段具有紧邻同缩进中文注释，注释与配置源码、默认值、校验和 reload/restart 一致；记录纳入文件、动态数据共享说明和第三方 schema 排除依据，并运行 YAML 解析与配置样例加载测试。
+8. 确认所有验证针对最后一次修改后的候选快照；后续编辑会使受影响结果失效。
+9. 识别数据库初始化、DBA/运维命令行 SQL、回填、缓存失效、配置 reload、进程重启、feature flag、回滚、补偿和人工发布步骤。
+10. 数据库变更交付必须列出目标环境/实例/库/表、当前与目标版本、SQL SHA-256、执行顺序、备份、锁与扫描风险、验证、停止条件和恢复方案；不得把本地 SQL 作为 Git 交付文件。
 
 ## 交付证据
 
-交付时说明改动范围、验证命令、跳过检查、仓库状态、已暂存文件、保留未动的无关改动，以及是否需要 migration、backfill、cache 或 compensation。
+最终交接逐项列出，禁止合并成“验证通过、可以发布”：
+
+- 代码范围：需求项、真实入口、修改文件、明确非目标和保留未动的用户改动。
+- 同步范围：从源码变化识别实际触发的 API/业务码/权限/安全、配置、Model/初始化 SQL、Redis、前端、文档、测试和运维面，逐项列出依据、修改文件与验证结果；常见风险面若判定不适用，附具体证据。配置项另列 YAML 字段注释位置、源码依据和排除文件。
+- 验证快照：最后一次修改后的命令、执行目录、worktree/index 范围、退出结果、未执行项和影响。
+- Git 状态：每个仓库 staged、unstaged、untracked 的任务文件；新交付文件已暂存，本地数据和无关历史文件未暂存，候选文件不存在 `MM`。
+- 数据与发布：新空库初始化、存量库 DBA SQL、回填、缓存失效、reload/restart、feature flag、观察指标、停止条件、回滚/补偿和责任人。
+- 状态：分别标记已完成且已验证、已完成但未验证、已交付待执行、已跳过或被阻塞；待人工 SQL、发布或重启不得写成已上线。

@@ -294,6 +294,7 @@ func TestDocumentPermissionBaseline(t *testing.T) {
 		"'admin', '角色文档/后端开发/系统组件功能说明.md'",
 		"'admin', '接口文档/后台系统/权限管理接口.md'",
 		"'api', '接口文档/前台系统/系统接口.md'",
+		"'api', '文档首页.md'",
 		"'api', '角色文档/后端开发/AI开发规范.md'",
 		"UNIQUE KEY `uk_site_path` (`site`,`path`)",
 	} {
@@ -301,14 +302,14 @@ func TestDocumentPermissionBaseline(t *testing.T) {
 			t.Fatalf("document permission migration missing %q", want)
 		}
 	}
-	if got := strings.Count(sql, "INSERT IGNORE INTO `admin_doc_permission`"); got != 65 {
-		t.Fatalf("document permission baseline count = %d, want 65", got)
+	if got := strings.Count(sql, "INSERT IGNORE INTO `admin_doc_permission`"); got != 62 {
+		t.Fatalf("document permission baseline count = %d, want 62", got)
 	}
-	if got := strings.Count(sql, "'admin',"); got != 52 {
-		t.Fatalf("admin document permission baseline count = %d, want 52", got)
+	if got := strings.Count(sql, "'admin',"); got != 48 {
+		t.Fatalf("admin document permission baseline count = %d, want 48", got)
 	}
-	if got := strings.Count(sql, "'api',"); got != 13 {
-		t.Fatalf("api document permission baseline count = %d, want 13", got)
+	if got := strings.Count(sql, "'api',"); got != 14 {
+		t.Fatalf("api document permission baseline count = %d, want 14", got)
 	}
 	for _, forbidden := range []string{"admin_role_doc_permission_rel", " SELECT ", " JOIN "} {
 		if strings.Contains(sql, forbidden) {

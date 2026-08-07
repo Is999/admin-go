@@ -1,4 +1,4 @@
 interface:
-  display_name: "Go 注释审计"
-  short_description: "审计 Go 中文注释和可维护性。"
-  default_prompt: "使用 $go-comment-style-audit 扫描这个 Go 仓库的中文注释和可维护性问题。"
+  display_name: "Go 与 YAML 注释审计"
+  short_description: "审计 Go 中文注释、YAML 配置字段行级说明、命名、结构和可维护性。"
+  default_prompt: "使用 $go-comment-style-audit 逐项核对新增 Go 声明和项目自有 YAML 固定字段的中文注释，并报告无职责包装与抽象。"

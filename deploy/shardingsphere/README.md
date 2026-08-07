@@ -68,7 +68,7 @@ go run ./cmd/shardingctl \
   > /tmp/app_db-sharding-rules.sql
 ```
 
-工具只生成计划，不连接生产。执行前必须人工核对。首个存储单元会被设置为身份目录、系统表和运行期表的默认单表节点；已有单表迁入该节点后还要执行 `LOAD SINGLE TABLE ds_0.*`。`user_tag` 必须在 `table-shards` 中显式声明自己的物理分片数，但不要求与 `user` 相同。
+工具只生成计划，不连接生产。执行前必须人工核对。首个存储单元会被设置为身份目录、系统表和运行期表的默认单表节点；已有单表迁入该节点后，由 DBA 渲染并执行 `sql/load-single-tables.sql.tmpl`，其中固定包含 `LOAD SINGLE TABLE ds_0.*` 和 `SHOW SINGLE TABLES` 核对命令。`user_tag` 必须在 `table-shards` 中显式声明自己的物理分片数，但不要求与 `user` 相同。
 
 ShardingSphere 5.5.3 不能接收 MySQL 客户端随语句发送的独立 SQL 注释。通过 Proxy 执行本目录的 `.sql.tmpl` 时必须使用 `mysql --skip-comments`；否则会在首条注释处返回 `Can not accept SQL type 'TerminalNodeImpl'`。`shardingctl` 生成结果不含 SQL 注释，可直接送入管理入口。
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Go 实现防漂移"
-  short_description: "约束 Go 后端实现符合 AI 开发规范。"
-  default_prompt: "使用 $go-ai-implementation-guard 按项目 AI 开发规范实现这个后端改动。"
+  short_description: "按项目规范复核 Go 实现、中文注释、YAML 字段说明、验证与契约，阻止实现漂移。"
+  default_prompt: "使用 $go-ai-implementation-guard 按仓库规范实现并验证这个 Go 后端需求，同时逐项核对代码与 YAML 配置字段注释。"

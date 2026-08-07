@@ -36,7 +36,7 @@ type Report struct {
 }
 
 // Source 定义只读校验数据源接口。
-// api 与 ark-admin-zero 只能通过 adapter 参与校验，不能成为 cron 的运行时强依赖。
+// API 与 Admin 只能通过 adapter 参与校验，不能成为用户标签任务的运行时强依赖。
 type Source interface {
 	Name() string                                                                          // 数据源名称
 	Load(ctx context.Context, uids []int64, start, end time.Time) ([]SourceSummary, error) // 批量加载校验摘要

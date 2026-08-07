@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"math/rand/v2"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -359,8 +360,12 @@ func withLock(ctx context.Context, redisClient redis.UniversalClient, key string
 		}
 	}()
 
-	// 统一收尾保证正常返回、业务错误和 panic 都会停止续期并释放锁；panic 保持原语义继续向上抛出。
+	// 统一收尾保证正常返回、业务错误和回调异常都会停止续期并释放锁。
+	// 回调异常在锁边界转换为 error，避免未挂 Recover 的后台调用链终止服务进程。
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = stderrors.Join(err, errors.Errorf("Redis 锁业务回调异常 key=%s value=%v stack=%s", key, recovered, debug.Stack()))
+		}
 		if unlockErr := lock.Unlock(); unlockErr != nil {
 			err = stderrors.Join(err, unlockErr)
 		}

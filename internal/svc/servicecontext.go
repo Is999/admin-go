@@ -16,6 +16,7 @@ import (
 	"admin/internal/requestctx"
 
 	utils "github.com/Is999/go-utils"
+	"github.com/Is999/go-utils/errors"
 	tablecache "github.com/Is999/table-cache"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -55,6 +56,7 @@ type ServiceContext struct {
 	storageValue      atomic.Value          // 文件存储运行时缓存，保存 *StorageRuntime
 	uploadValue       atomic.Value          // 文件上传运行时缓存，保存 *FileTransferRuntime
 	cacheSyncPending  *atomic.Bool          // 是否存在尚未完成的安全缓存失效任务
+	background        *backgroundTasks      // 请求完成后的短后台任务集合，停机时先等待再关闭数据库等资源
 	SiteDBs           SiteDatabases         // 主库与可选扩展库连接集合
 	Kafka             *kafkax.Producer      // Kafka 生产者，未启用时为空
 	Rds               redis.UniversalClient // Redis 客户端（兼容单机/集群）
@@ -134,6 +136,7 @@ func NewServiceContext(c config.Config, deps Dependencies) *ServiceContext {
 		TableCacheMetrics: deps.TableCacheMetrics,
 		TrustedProxies:    trustedProxies,
 		cacheSyncPending:  &atomic.Bool{},
+		background:        newBackgroundTasks(),
 	}
 	if svcCtx.RedisLimiter == nil && deps.Rds != nil {
 		svcCtx.RedisLimiter = redislimit.New(deps.Rds)
@@ -162,6 +165,7 @@ func (s *ServiceContext) ScopedWithContext(ctx context.Context) *ServiceContext 
 		TableCacheMetrics: s.TableCacheMetrics,
 		TrustedProxies:    s.TrustedProxies,
 		cacheSyncPending:  s.cacheSyncPending,
+		background:        s.background,
 	}
 	scoped.configValue.Store(s.CurrentConfig())
 	scoped.Task = s.Task
@@ -177,6 +181,19 @@ func (s *ServiceContext) ScopedWithContext(ctx context.Context) *ServiceContext 
 	}
 	scoped.UpdateHotReloadStatus(s.CurrentHotReloadStatus())
 	return scoped
+}
+
+// GoBackground 登记请求完成后继续执行的短后台任务；停机开始后返回 false。
+func (s *ServiceContext) GoBackground(task func()) bool {
+	return s != nil && s.background != nil && s.background.Go(task)
+}
+
+// StopBackground 停止接收短后台任务并等待已登记任务完成。
+func (s *ServiceContext) StopBackground(ctx context.Context) error {
+	if s == nil || s.background == nil {
+		return nil
+	}
+	return errors.Tag(s.background.Stop(ctx))
 }
 
 // SetSecurityCacheSyncPending 更新安全缓存失效任务的进程内阻断状态。

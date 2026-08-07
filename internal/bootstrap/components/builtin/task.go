@@ -28,6 +28,9 @@ func newTaskRuntime() core.Component {
 		if !state.Config.Task.Enabled {
 			return nil
 		}
+		if err := taskqueue.RegisterMetrics(); err != nil {
+			return errors.Wrap(err, "注册任务队列指标失败")
+		}
 
 		// 任务配置注入 AppID，保证队列、调度锁和幂等键按站点隔离。
 		taskCfg := TaskConfigWithAppID(state.Config)

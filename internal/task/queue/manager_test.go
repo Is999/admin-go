@@ -710,6 +710,111 @@ func TestEnqueueWorkflowTriggerReservesUniqueBeforeEnqueue(t *testing.T) {
 	}
 }
 
+// TestEnqueueWorkflowTriggerReleasesUniqueReservationAfterCanceledEnqueue 验证请求取消导致入队失败后仍会释放当前实例的唯一键预占。
+func TestEnqueueWorkflowTriggerReleasesUniqueReservationAfterCanceledEnqueue(t *testing.T) {
+	manager, cleanup := newTestManager(t)
+	defer cleanup()
+
+	const (
+		workflowName = "demo.workflow.canceled-enqueue"
+		uniqueKey    = "retry"
+	)
+	if err := manager.RegisterWorkflow(testWorkflowDefinition(workflowName)); err != nil {
+		t.Fatalf("注册工作流失败: %v", err)
+	}
+
+	realClient := manager.client
+	ctx, cancel := context.WithCancel(context.Background())
+	manager.client = taskEnqueuerFunc(func(context.Context, *asynq.Task, ...asynq.Option) (*asynq.TaskInfo, error) {
+		cancel()
+		return nil, context.Canceled
+	})
+	req := &types.TriggerTaskWorkflowReq{Name: workflowName, UniqueKey: uniqueKey}
+	if _, err := manager.EnqueueWorkflowTrigger(ctx, req); !errors.Is(err, context.Canceled) {
+		t.Fatalf("期望返回 context.Canceled，实际为 %v", err)
+	}
+
+	reservationKey := manager.workflowUniqueKey(workflowName, uniqueKey)
+	exists, err := manager.redis.Exists(context.Background(), reservationKey).Result()
+	if err != nil {
+		t.Fatalf("检查唯一键预占失败: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("入队失败后唯一键预占仍存在 key=%s", reservationKey)
+	}
+
+	manager.client = realClient
+	if _, err := manager.EnqueueWorkflowTrigger(context.Background(), req); err != nil {
+		t.Fatalf("清理预占后相同业务请求应可立即重试: %v", err)
+	}
+}
+
+// TestEnqueueWorkflowTriggerUniqueReservationIsAtomic 校验并发触发只由唯一键 SETNX 选出一个工作流实例。
+func TestEnqueueWorkflowTriggerUniqueReservationIsAtomic(t *testing.T) {
+	manager, cleanup := newTestManager(t)
+	defer cleanup()
+
+	const (
+		workflowName = "demo.workflow.concurrent"
+		uniqueKey    = "same"
+		concurrency  = 16
+	)
+	if err := manager.RegisterWorkflow(testWorkflowDefinition(workflowName)); err != nil {
+		t.Fatalf("注册工作流失败: %v", err)
+	}
+	type enqueueResult struct {
+		resp *types.TaskWorkflowTriggerResp // 成功预占者的工作流回执
+		err  error                          // 其余竞争者应返回 ErrWorkflowAlreadyExists
+	}
+	start := make(chan struct{})
+	results := make(chan enqueueResult, concurrency)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(concurrency)
+	for range concurrency {
+		go func() {
+			defer waitGroup.Done()
+			<-start
+			// 每个 HTTP/任务调用都有独立 DTO；这里只共享同一业务唯一键来验证 Redis 原子竞争。
+			resp, err := manager.EnqueueWorkflowTrigger(context.Background(), &types.TriggerTaskWorkflowReq{
+				Name:      workflowName,
+				UniqueKey: uniqueKey,
+			})
+			results <- enqueueResult{resp: resp, err: err}
+		}()
+	}
+	close(start)
+	waitGroup.Wait()
+	close(results)
+
+	successCount := 0
+	conflictCount := 0
+	winnerID := ""
+	for result := range results {
+		switch {
+		case result.err == nil:
+			successCount++
+			if result.resp == nil || result.resp.WorkflowID == "" {
+				t.Fatalf("成功预占缺少工作流回执: %+v", result.resp)
+			}
+			winnerID = result.resp.WorkflowID
+		case errors.Is(result.err, ErrWorkflowAlreadyExists):
+			conflictCount++
+		default:
+			t.Fatalf("并发预占返回非预期错误: %v", result.err)
+		}
+	}
+	if successCount != 1 || conflictCount != concurrency-1 {
+		t.Fatalf("并发预占结果 success=%d conflict=%d，期望 1/%d", successCount, conflictCount, concurrency-1)
+	}
+	storedID, err := manager.redis.Get(context.Background(), manager.workflowUniqueKey(workflowName, uniqueKey)).Result()
+	if err != nil {
+		t.Fatalf("读取并发唯一键预占结果失败: %v", err)
+	}
+	if storedID != winnerID {
+		t.Fatalf("唯一键 owner=%s，期望成功工作流 %s", storedID, winnerID)
+	}
+}
+
 // TestEnqueueWorkflowTriggerExtendsUniqueReservationForDelayedTrigger 验证延迟触发会延长唯一键保留时间。
 func TestEnqueueWorkflowTriggerExtendsUniqueReservationForDelayedTrigger(t *testing.T) {
 	manager, cleanup := newTestManager(t)
@@ -936,8 +1041,8 @@ func TestEnqueueWorkflowTriggerRejectsConflictingScheduleOptions(t *testing.T) {
 	}
 }
 
-// TestStartWorkflowAllowsReservedUniqueLock 验证已由当前实例预占的唯一键允许继续启动工作流。
-func TestStartWorkflowAllowsReservedUniqueLock(t *testing.T) {
+// TestStartWorkflowAllowsReservedUniqueReservation 验证已由当前实例预占的唯一键允许继续启动工作流。
+func TestStartWorkflowAllowsReservedUniqueReservation(t *testing.T) {
 	manager, cleanup := newTestManager(t)
 	defer cleanup()
 

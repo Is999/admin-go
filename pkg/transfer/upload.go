@@ -635,7 +635,7 @@ func (m *LocalUploadManager) withUploadChunkLock(ctx context.Context, uploadID s
 	return m.withRedisLock(ctx, m.chunkLockKey(uploadID, chunkIndex), "上传分片锁", fn)
 }
 
-// withRedisLock 使用项目统一 Redlock 封装实现短时互斥锁。
+// withRedisLock 使用项目统一 Redis owner 租约封装实现短时互斥锁。
 // 会话锁只保护状态提交；分片锁只保护同一 chunk 的文件覆盖，锁丢失时通过 lockCtx 通知长耗时写入尽快退出。
 func (m *LocalUploadManager) withRedisLock(ctx context.Context, lockKey string, lockName string, fn func(context.Context) error) error {
 	if fn == nil {
@@ -651,7 +651,7 @@ func (m *LocalUploadManager) withRedisLock(ctx context.Context, lockKey string, 
 	if lockKey == "" {
 		return errors.Errorf("%s key 不能为空", lockName)
 	}
-	// lockErr 保留 Redlock 加锁、续期、释放或业务回调错误，统一追加锁名称便于排障。
+	// lockErr 保留 Redis 锁加锁、续期、释放或业务回调错误，统一追加锁名称便于排障。
 	lockErr := redislock.WithLock(ctx, m.client, lockKey, uploadSessionLockTTL, func(lockCtx context.Context) error {
 		return fn(lockCtx)
 	})

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	i18n "admin/common/i18n"
+	"admin/common/idgen"
 	"admin/internal/bootstrap/components"
 	componentbuiltin "admin/internal/bootstrap/components/builtin"
 	"admin/internal/bootstrap/configload"
@@ -66,6 +67,9 @@ type App struct {
 // New 负责把依赖装配与 HTTP 服务注册串起来，并支持通过可选参数注入外部任务插件。
 func New(ctx context.Context, c config.Config, mode int, options ...Option) (*App, error) {
 	configload.Normalize(&c)
+	if err := idgen.RegisterMetrics(); err != nil {
+		return nil, errors.Wrap(err, "注册 ID 生成指标失败")
+	}
 	resolvedOptions := resolveOptions(options)
 	mode, err := runmode.Normalize(mode)
 	if err != nil {

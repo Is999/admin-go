@@ -765,9 +765,9 @@ func TestEnqueueWorkflowHistoryIgnoresCanceledBusinessContext(t *testing.T) {
 // TestTerminalWorkflowReplayRepairsMissingHistoryEvent 验证同终态重放可补齐首次收尾中断后缺失的历史事件。
 func TestTerminalWorkflowReplayRepairsMissingHistoryEvent(t *testing.T) {
 	for _, testCase := range []struct {
-		name   string
-		status string
-		finish func(*Manager, context.Context, string) error
+		name   string                                        // name 标识工作流终态重放场景。
+		status string                                        // status 是首次写入 Redis 的工作流终态。
+		finish func(*Manager, context.Context, string) error // finish 再次执行相同终态收尾以补齐历史事件。
 	}{
 		{name: "success", status: WorkflowStatusSuccess, finish: func(manager *Manager, ctx context.Context, workflowID string) error {
 			return manager.completeWorkflow(ctx, workflowID)

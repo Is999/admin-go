@@ -174,7 +174,9 @@ func New(cfg config.CollectorConfig, failureDB *gorm.DB, redisClient redis.Unive
 	if cfg.Enabled && collectorAnyIdempotencyEnabled(cfg) && redisClient == nil {
 		return nil, errors.Errorf("collector.enabled=true 时必须提供 Redis 幂等存储")
 	}
-	ensureMetricsRegistered()
+	if err := RegisterMetrics(); err != nil {
+		return nil, errors.Wrap(err, "注册 Collector 指标失败")
+	}
 	normalizeCollectorTaskRoutes(&cfg)
 
 	m := &Manager{

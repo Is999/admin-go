@@ -32,19 +32,32 @@ func TestMoveSourcesStable(t *testing.T) {
 
 // TestAssetSQLStripsHeaderComment 验证嵌入 SQL 在交给驱动前移除文件头注释。
 func TestAssetSQLStripsHeaderComment(t *testing.T) {
-	query := assetSQL("table-exists.sql.tmpl")
+	query, err := assetSQL("table-exists.sql.tmpl")
+	if err != nil {
+		t.Fatalf("assetSQL() error = %v", err)
+	}
 	if strings.HasPrefix(query, "--") || !strings.HasPrefix(query, "SELECT") {
 		t.Fatalf("assetSQL() = %q", query)
 	}
 }
 
+// TestAssetSQLReturnsMissingAssetError 验证发布物资产名错误时返回受控错误，不终止拆表命令进程。
+func TestAssetSQLReturnsMissingAssetError(t *testing.T) {
+	if _, err := assetSQL("missing.sql.tmpl"); err == nil {
+		t.Fatal("assetSQL() error = nil, want missing asset error")
+	}
+}
+
 // TestCleanupSQLUsesRangeIndexOrder 验证旧数据清理按复合索引顺序取有界批次。
 func TestCleanupSQLUsesRangeIndexOrder(t *testing.T) {
-	query := renderSQL("cleanup-range.sql.tmpl", map[string]string{
+	query, err := renderSQL("cleanup-range.sql.tmpl", map[string]string{
 		"{{SOURCE}}": "`user`",
 		"{{CURSOR}}": "`id`",
 		"{{SHARD}}":  "`shard_no`",
 	})
+	if err != nil {
+		t.Fatalf("renderSQL() error = %v", err)
+	}
 	if !strings.Contains(query, "ORDER BY `shard_no`, `id`") {
 		t.Fatalf("cleanup SQL does not use range index order: %s", query)
 	}
@@ -52,11 +65,14 @@ func TestCleanupSQLUsesRangeIndexOrder(t *testing.T) {
 
 // TestRouteMismatchSQLBindsUIDFormula 验证数据门禁在单桶索引范围内检查 UID 公式。
 func TestRouteMismatchSQLBindsUIDFormula(t *testing.T) {
-	query := renderSQL("route-mismatch.sql.tmpl", map[string]string{
+	query, err := renderSQL("route-mismatch.sql.tmpl", map[string]string{
 		"{{TABLE}}": "`user_tag_0`",
 		"{{UID}}":   "`uid`",
 		"{{SHARD}}": "`shard_no`",
 	})
+	if err != nil {
+		t.Fatalf("renderSQL() error = %v", err)
+	}
 	if !strings.Contains(query, "MOD(CRC32(CAST(`uid` AS CHAR)), 1024)") ||
 		!strings.Contains(query, "`uid` > 9223372036854775807") ||
 		!strings.Contains(query, "`shard_no` = ?") ||
@@ -68,10 +84,13 @@ func TestRouteMismatchSQLBindsUIDFormula(t *testing.T) {
 
 // TestRouteRangeMismatchSQLUsesShardBounds 验证桶范围门禁只使用固定桶索引边界。
 func TestRouteRangeMismatchSQLUsesShardBounds(t *testing.T) {
-	query := renderSQL("route-range-mismatch.sql.tmpl", map[string]string{
+	query, err := renderSQL("route-range-mismatch.sql.tmpl", map[string]string{
 		"{{TABLE}}": "`user_tag_0`",
 		"{{SHARD}}": "`shard_no`",
 	})
+	if err != nil {
+		t.Fatalf("renderSQL() error = %v", err)
+	}
 	if !strings.Contains(query, "`shard_no` < ?") || !strings.Contains(query, "`shard_no` > ?") {
 		t.Fatalf("route range mismatch SQL is incomplete: %s", query)
 	}

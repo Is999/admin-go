@@ -39,8 +39,12 @@ func newHTTPServer() core.Component {
 		if err := register.ValidateNamesUnique(register.KindRoute, register.RouteModuleNames(routeModules)); err != nil {
 			return errors.Tag(err)
 		}
-		handler.RegisterPublicHandlersWithModules(server, state.ServiceContext, routeModules...)
-		handler.RegisterInternalHandlersWithModules(internalServer, state.ServiceContext, routeModules...)
+		if err := handler.RegisterPublicHandlersWithModules(server, state.ServiceContext, routeModules...); err != nil {
+			return errors.Wrap(err, "注册公网 HTTP 路由失败")
+		}
+		if err := handler.RegisterInternalHandlersWithModules(internalServer, state.ServiceContext, routeModules...); err != nil {
+			return errors.Wrap(err, "注册内网 HTTP 路由失败")
+		}
 		state.Server = server
 		state.InternalServer = internalServer
 		return nil

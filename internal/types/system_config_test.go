@@ -39,9 +39,9 @@ func TestSysConfigExcelImportJSONBinding(t *testing.T) {
 // TestSysConfigExcelBackupDownloadReqValidate 校验下载路径与签名 query 必须绑定同一备份。
 func TestSysConfigExcelBackupDownloadReqValidate(t *testing.T) {
 	tests := []struct {
-		name    string // name 表示测试场景。
-		req     SysConfigExcelBackupDownloadReq
-		wantErr bool
+		name    string                          // name 表示测试场景。
+		req     SysConfigExcelBackupDownloadReq // req 同时携带路径参数和签名查询参数。
+		wantErr bool                            // wantErr 表示两个备份 ID 不一致时必须拒绝下载。
 	}{
 		{
 			name: "matched",

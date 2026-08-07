@@ -12,6 +12,78 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// TestLockRetryDelayUsesLinearJitteredBackoff 校验五次重试落在约定区间，超过第五轮后基础等待不再增长。
+func TestLockRetryDelayUsesLinearJitteredBackoff(t *testing.T) {
+	// cases 同时覆盖每轮上下界、非法抖动归一化和未来增加重试次数时的封顶行为。
+	cases := []struct {
+		name   string        // 当前边界场景
+		tries  int           // go-redsync 传入的重试轮次，从 1 开始
+		jitter time.Duration // 由随机源生成的抖动值
+		want   time.Duration // 归一化后的最终等待
+	}{
+		{name: "first lower", tries: 1, jitter: 0, want: 100 * time.Millisecond},
+		{name: "first upper", tries: 1, jitter: 100 * time.Millisecond, want: 200 * time.Millisecond},
+		{name: "second lower", tries: 2, jitter: 0, want: 200 * time.Millisecond},
+		{name: "second upper", tries: 2, jitter: 100 * time.Millisecond, want: 300 * time.Millisecond},
+		{name: "third lower", tries: 3, jitter: 0, want: 300 * time.Millisecond},
+		{name: "third upper", tries: 3, jitter: 100 * time.Millisecond, want: 400 * time.Millisecond},
+		{name: "fourth lower", tries: 4, jitter: 0, want: 400 * time.Millisecond},
+		{name: "fourth upper", tries: 4, jitter: 100 * time.Millisecond, want: 500 * time.Millisecond},
+		{name: "fifth lower", tries: 5, jitter: 0, want: 500 * time.Millisecond},
+		{name: "fifth upper", tries: 5, jitter: 100 * time.Millisecond, want: 600 * time.Millisecond},
+		{name: "base capped", tries: 6, jitter: 0, want: 500 * time.Millisecond},
+		{name: "jitter capped", tries: 6, jitter: time.Second, want: 600 * time.Millisecond},
+		{name: "invalid values", tries: 0, jitter: -time.Second, want: 100 * time.Millisecond},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := lockRetryDelay(tt.tries, tt.jitter); got != tt.want {
+				t.Fatalf("lockRetryDelay(%d, %v) = %v, want %v", tt.tries, tt.jitter, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLockRetryDelayTotalRangeFitsAcquireTimeout 校验六次尝试对应五段等待，纯退避总计为 1.5–2s。
+func TestLockRetryDelayTotalRangeFitsAcquireTimeout(t *testing.T) {
+	// minTotal 和 maxTotal 分别表示无抖动与每轮最大抖动时的纯等待总和，不包含 Redis 请求耗时。
+	var minTotal time.Duration
+	var maxTotal time.Duration
+	for tries := 1; tries < lockAcquireTries; tries++ {
+		minTotal += lockRetryDelay(tries, 0)
+		maxTotal += lockRetryDelay(tries, maxLockRetryJitter)
+	}
+	if minTotal != 1500*time.Millisecond || maxTotal != 2*time.Second {
+		t.Fatalf("retry delay total range = %v–%v, want 1.5s–2s", minTotal, maxTotal)
+	}
+	if maxLockAcquireTimeout <= maxTotal {
+		t.Fatalf("maxLockAcquireTimeout = %v, must exceed maximum backoff %v", maxLockAcquireTimeout, maxTotal)
+	}
+}
+
+// TestTryLockWithoutContentionUsesSingleAcquireCommand 校验无竞争时首轮成功，不因退避策略增加 Redis 加锁请求。
+func TestTryLockWithoutContentionUsesSingleAcquireCommand(t *testing.T) {
+	// server 和 client 先用 PING 完成连接初始化，使命令差值只包含 RedSync 的加锁请求。
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		t.Fatalf("redis PING failed: %v", err)
+	}
+
+	before := server.CommandCount()
+	lock := NewLock(client, "lock:no-contention")
+	if err := lock.TryLock(context.Background(), time.Second); err != nil {
+		t.Fatalf("TryLock() error = %v", err)
+	}
+	if got := server.CommandCount() - before; got != 1 {
+		t.Fatalf("uncontended acquire command count = %d, want 1", got)
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("Unlock() error = %v", err)
+	}
+}
+
 // TestTryLockRejectsNilRedisClient 校验 nil Redis 客户端会返回明确错误，而不是在 redsync 内部 panic。
 func TestTryLockRejectsNilRedisClient(t *testing.T) {
 	// lock 模拟调用方传入 nil Redis 客户端时创建出来的锁实例。
@@ -48,6 +120,41 @@ func TestIsLockTakenDetectsContention(t *testing.T) {
 	}
 	if !IsLockTaken(err) {
 		t.Fatalf("expected lock taken error, got %v", err)
+	}
+}
+
+// TestWithLockOnceReturnsContentionWithoutRetry 校验单次入口只执行一轮抢锁和清理，不进入全局退避。
+func TestWithLockOnceReturnsContentionWithoutRetry(t *testing.T) {
+	// server 和 client 构造稳定竞争；holder 的 TTL 足以避免测试期间触发续期命令干扰计数。
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+
+	holder := NewLock(client, "lock:single-attempt")
+	if err := holder.TryLock(context.Background(), 2*time.Second); err != nil {
+		t.Fatalf("expected holder lock success, got %v", err)
+	}
+	defer holder.Unlock()
+
+	before := server.CommandCount()
+	startedAt := time.Now()
+	callbackCalled := false
+	err := WithLockOnce(context.Background(), client, "lock:single-attempt", 2*time.Second, func(context.Context) error {
+		callbackCalled = true
+		return nil
+	})
+	if !IsLockTaken(err) {
+		t.Fatalf("WithLockOnce() error = %v, want ErrLockTaken", err)
+	}
+	if callbackCalled {
+		t.Fatal("WithLockOnce() callback ran without owning the lock")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("WithLockOnce() contention elapsed = %v, want no retry backoff", elapsed)
+	}
+	// miniredis 会把 SETNX、脚本缓存回退和脚本内 owner 读取分别计数；单轮冷启动路径固定为 4，更多命令表示发生了重试。
+	if got := server.CommandCount() - before; got != 4 {
+		t.Fatalf("WithLockOnce() contention command count = %d, want 4", got)
 	}
 }
 

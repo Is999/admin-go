@@ -224,10 +224,14 @@ func runUserTagEventOutboxRetryScanTask(ctx context.Context, svcCtx *svc.Service
 	}
 	deps := repository.NewRuntimeDeps(svcCtx, route.NewShardPlanWithResult(defaults.ShardTotal, defaults.ResultShardTotal))
 	lockKey := keys.UserTagEventOutboxRetryScanRedisKey()
-	err = redislock.WithLock(ctx, svcCtx.Rds, lockKey, userTagEventOutboxRetryScanLockTTL, func(lockCtx context.Context) error {
+	err = redislock.WithLockOnce(ctx, svcCtx.Rds, lockKey, userTagEventOutboxRetryScanLockTTL, func(lockCtx context.Context) error {
 		_, runErr := repository.NewTagRepository(deps).RetryEventOutboxAbnormalRows(lockCtx, opts, hook.DefaultRegistry().Dispatch)
 		return errors.Tag(runErr)
 	})
+	if redislock.IsLockTaken(err) {
+		// 周期重复触发已由其它实例执行时直接跳过，不能把正常互斥竞争写入任务 retry/dead。
+		return nil
+	}
 	return errors.Tag(err)
 }
 
@@ -243,9 +247,13 @@ func runUserTagRuntimeCleanupTask(ctx context.Context, svcCtx *svc.ServiceContex
 	}
 	deps := repository.NewRuntimeDeps(svcCtx, route.NewShardPlanWithResult(defaults.ShardTotal, defaults.ResultShardTotal))
 	lockKey := keys.UserTagRuntimeCleanupRedisKey()
-	err := redislock.WithLock(ctx, svcCtx.Rds, lockKey, userTagRuntimeCleanupLockTTL, func(lockCtx context.Context) error {
+	err := redislock.WithLockOnce(ctx, svcCtx.Rds, lockKey, userTagRuntimeCleanupLockTTL, func(lockCtx context.Context) error {
 		return repository.NewTagRepository(deps).CleanupStaleRuntimeTables(lockCtx, time.Now())
 	})
+	if redislock.IsLockTaken(err) {
+		// 清理任务只要求同一时刻一个实例推进；已有持有者时本轮成功跳过，由下一周期继续检查。
+		return nil
+	}
 	return errors.Tag(err)
 }
 

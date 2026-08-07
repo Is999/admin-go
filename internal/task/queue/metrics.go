@@ -5,8 +5,10 @@ import (
 	"sync"
 	"time"
 
+	"admin/common/prometheusx"
 	"admin/internal/task/stats"
 
+	"github.com/Is999/go-utils/errors"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -22,6 +24,7 @@ const (
 // 任务队列指标变量集中定义执行次数、耗时和业务处理量统计。
 var (
 	taskMetricsOnce sync.Once // 保证任务指标只注册一次
+	taskMetricsErr  error     // 保存启动期指标注册冲突，运行期记录遇到错误时直接跳过
 	// taskMetricLabelGuard 保护任务队列动态指标标签白名单。
 	taskMetricLabelGuard = struct {
 		mu        sync.RWMutex        // 保护动态 label 白名单
@@ -65,15 +68,18 @@ var (
 	)
 )
 
-// ensureTaskMetricsRegistered 保证任务系统指标只注册一次。
-func ensureTaskMetricsRegistered() {
+// RegisterMetrics 注册任务系统指标；同类型重复指标复用既有实例，冲突通过启动错误返回。
+func RegisterMetrics() error {
 	taskMetricsOnce.Do(func() {
-		prometheus.MustRegister(
-			taskExecutionsTotal,
-			taskExecutionDuration,
-			taskProcessedItemsTotal,
-		)
+		if taskExecutionsTotal, taskMetricsErr = prometheusx.Register(taskExecutionsTotal); taskMetricsErr != nil {
+			return
+		}
+		if taskExecutionDuration, taskMetricsErr = prometheusx.Register(taskExecutionDuration); taskMetricsErr != nil {
+			return
+		}
+		taskProcessedItemsTotal, taskMetricsErr = prometheusx.Register(taskProcessedItemsTotal)
 	})
+	return errors.Tag(taskMetricsErr)
 }
 
 // allowTaskMetricTaskTypeLabel 登记已注册任务类型，优先保留正式处理器的 task_type 维度。
@@ -89,7 +95,9 @@ func allowTaskMetricTaskTypeLabel(taskType string) {
 
 // recordTaskExecutionMetrics 记录任务执行次数、耗时和低基数处理量指标。
 func recordTaskExecutionMetrics(queue string, taskType string, runErr error, duration time.Duration, snapshot *taskstats.Snapshot) {
-	ensureTaskMetricsRegistered()
+	if RegisterMetrics() != nil {
+		return
+	}
 	queueLabel := normalizeTaskMetricQueueLabel(queue)
 	taskTypeLabel := normalizeTaskMetricTaskTypeLabel(taskType)
 	result := taskMetricResultSuccess

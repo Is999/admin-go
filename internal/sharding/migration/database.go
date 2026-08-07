@@ -78,10 +78,14 @@ func Prepare(ctx context.Context, database *sql.DB, opts PrepareOptions) ([]shar
 		return nil, err
 	}
 	for _, move := range moves {
-		if _, err := database.ExecContext(ctx, renderSQL("create-target.sql.tmpl", map[string]string{
+		query, renderErr := renderSQL("create-target.sql.tmpl", map[string]string{
 			"{{SOURCE}}": quoteIdentifier(move.Source),
 			"{{TARGET}}": quoteIdentifier(move.Target),
-		})); err != nil {
+		})
+		if renderErr != nil {
+			return nil, renderErr
+		}
+		if _, err := database.ExecContext(ctx, query); err != nil {
 			return nil, errors.Wrapf(err, "创建目标物理表失败 target=%s", move.Target)
 		}
 		if err := validateTarget(ctx, database, move); err != nil {
@@ -114,9 +118,18 @@ func AcquireSourceReadLock(ctx context.Context, database *sql.DB, opts PrepareOp
 	for _, source := range sources {
 		tableLocks = append(tableLocks, quoteIdentifier(source)+" READ")
 	}
-	query := renderSQL("lock-source-tables.sql.tmpl", map[string]string{
+	query, err := renderSQL("lock-source-tables.sql.tmpl", map[string]string{
 		"{{TABLE_LOCKS}}": strings.Join(tableLocks, ", "),
 	})
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	unlockQuery, err := assetSQL("unlock-tables.sql.tmpl")
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
 	if _, err := connection.ExecContext(ctx, query); err != nil {
 		_ = connection.Close()
 		return nil, errors.Wrapf(err, "锁定源物理表写入失败 tables=%s", strings.Join(sources, ","))
@@ -124,7 +137,7 @@ func AcquireSourceReadLock(ctx context.Context, database *sql.DB, opts PrepareOp
 	return func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = connection.ExecContext(releaseCtx, assetSQL("unlock-tables.sql.tmpl"))
+		_, _ = connection.ExecContext(releaseCtx, unlockQuery)
 		_ = connection.Close()
 	}, nil
 }
@@ -170,11 +183,14 @@ func Cleanup(ctx context.Context, database *sql.DB, opts CleanupOptions) (int64,
 	}
 	var deleted int64
 	for _, move := range moves {
-		query := renderSQL("cleanup-range.sql.tmpl", map[string]string{
+		query, renderErr := renderSQL("cleanup-range.sql.tmpl", map[string]string{
 			"{{SOURCE}}": quoteIdentifier(move.Source),
 			"{{CURSOR}}": quoteIdentifier(opts.CursorColumn),
 			"{{SHARD}}":  quoteIdentifier(opts.ShardColumn),
 		})
+		if renderErr != nil {
+			return deleted, renderErr
+		}
 		for {
 			result, execErr := database.ExecContext(ctx, query, move.BucketStart, move.BucketEnd, opts.BatchSize)
 			if execErr != nil {
@@ -225,6 +241,34 @@ func validateSources(ctx context.Context, database *sql.DB, opts PrepareOptions,
 	if err != nil {
 		return err
 	}
+	tableEngineQuery, err := assetSQL("table-engine.sql.tmpl")
+	if err != nil {
+		return err
+	}
+	foreignKeyQuery, err := assetSQL("foreign-key-count.sql.tmpl")
+	if err != nil {
+		return err
+	}
+	triggerQuery, err := assetSQL("trigger-count.sql.tmpl")
+	if err != nil {
+		return err
+	}
+	columnExistsQuery, err := assetSQL("column-exists.sql.tmpl")
+	if err != nil {
+		return err
+	}
+	integerColumnQuery, err := assetSQL("integer-column.sql.tmpl")
+	if err != nil {
+		return err
+	}
+	rangeIndexQuery, err := assetSQL("range-index.sql.tmpl")
+	if err != nil {
+		return err
+	}
+	uniqueCursorQuery, err := assetSQL("unique-cursor.sql.tmpl")
+	if err != nil {
+		return err
+	}
 	sources := make(map[string]sharding.Table, opts.FromCount)
 	for _, move := range moves {
 		table, tableErr := fromPlan.TableForBucket(move.BucketStart)
@@ -248,21 +292,21 @@ func validateSources(ctx context.Context, database *sql.DB, opts PrepareOptions,
 			return errors.Errorf("源物理表不存在 source=%s", name)
 		}
 		var engine string
-		if err := database.QueryRowContext(ctx, assetSQL("table-engine.sql.tmpl"), name).Scan(&engine); err != nil {
+		if err := database.QueryRowContext(ctx, tableEngineQuery, name).Scan(&engine); err != nil {
 			return errors.Wrapf(err, "校验源表存储引擎失败 source=%s", name)
 		}
 		if !strings.EqualFold(engine, "InnoDB") {
 			return errors.Errorf("源物理表必须使用 InnoDB source=%s engine=%s", name, engine)
 		}
 		var foreignKeyCount int
-		if err := database.QueryRowContext(ctx, assetSQL("foreign-key-count.sql.tmpl"), name).Scan(&foreignKeyCount); err != nil {
+		if err := database.QueryRowContext(ctx, foreignKeyQuery, name).Scan(&foreignKeyCount); err != nil {
 			return errors.Wrapf(err, "校验源表外键失败 source=%s", name)
 		}
 		if foreignKeyCount != 0 {
 			return errors.Errorf("源物理表存在外键，应用内在线拆表不支持 source=%s count=%d", name, foreignKeyCount)
 		}
 		var triggerCount int
-		if err := database.QueryRowContext(ctx, assetSQL("trigger-count.sql.tmpl"), name).Scan(&triggerCount); err != nil {
+		if err := database.QueryRowContext(ctx, triggerQuery, name).Scan(&triggerCount); err != nil {
 			return errors.Wrapf(err, "校验源表触发器失败 source=%s", name)
 		}
 		if triggerCount != 0 {
@@ -270,7 +314,7 @@ func validateSources(ctx context.Context, database *sql.DB, opts PrepareOptions,
 		}
 		for _, column := range []string{opts.UIDColumn, opts.ShardColumn, opts.CursorColumn} {
 			var count int
-			if err := database.QueryRowContext(ctx, assetSQL("column-exists.sql.tmpl"), name, column).Scan(&count); err != nil {
+			if err := database.QueryRowContext(ctx, columnExistsQuery, name, column).Scan(&count); err != nil {
 				return errors.Wrapf(err, "校验源表字段失败 source=%s column=%s", name, column)
 			}
 			if count != 1 {
@@ -278,14 +322,14 @@ func validateSources(ctx context.Context, database *sql.DB, opts PrepareOptions,
 			}
 		}
 		var integerUIDCount int
-		if err := database.QueryRowContext(ctx, assetSQL("integer-column.sql.tmpl"), name, opts.UIDColumn).Scan(&integerUIDCount); err != nil {
+		if err := database.QueryRowContext(ctx, integerColumnQuery, name, opts.UIDColumn).Scan(&integerUIDCount); err != nil {
 			return errors.Wrapf(err, "校验非空整数 UID 字段失败 source=%s column=%s", name, opts.UIDColumn)
 		}
 		if integerUIDCount != 1 {
 			return errors.Errorf("源表 UID 字段必须是非空整数类型 source=%s column=%s", name, opts.UIDColumn)
 		}
 		var integerShardCount int
-		if err := database.QueryRowContext(ctx, assetSQL("integer-column.sql.tmpl"), name, opts.ShardColumn).Scan(&integerShardCount); err != nil {
+		if err := database.QueryRowContext(ctx, integerColumnQuery, name, opts.ShardColumn).Scan(&integerShardCount); err != nil {
 			return errors.Wrapf(err, "校验非空整数固定桶字段失败 source=%s column=%s", name, opts.ShardColumn)
 		}
 		if integerShardCount != 1 {
@@ -296,21 +340,21 @@ func validateSources(ctx context.Context, database *sql.DB, opts PrepareOptions,
 			integerCursorCount = integerUIDCount
 		} else if opts.CursorColumn == opts.ShardColumn {
 			integerCursorCount = integerShardCount
-		} else if err := database.QueryRowContext(ctx, assetSQL("integer-column.sql.tmpl"), name, opts.CursorColumn).Scan(&integerCursorCount); err != nil {
+		} else if err := database.QueryRowContext(ctx, integerColumnQuery, name, opts.CursorColumn).Scan(&integerCursorCount); err != nil {
 			return errors.Wrapf(err, "校验非空整数分页游标失败 source=%s column=%s", name, opts.CursorColumn)
 		}
 		if integerCursorCount != 1 {
 			return errors.Errorf("源表分页游标必须是非空整数类型 source=%s column=%s", name, opts.CursorColumn)
 		}
 		var indexCount int
-		if err := database.QueryRowContext(ctx, assetSQL("range-index.sql.tmpl"), name, opts.ShardColumn, opts.CursorColumn).Scan(&indexCount); err != nil {
+		if err := database.QueryRowContext(ctx, rangeIndexQuery, name, opts.ShardColumn, opts.CursorColumn).Scan(&indexCount); err != nil {
 			return errors.Wrapf(err, "校验迁移索引失败 source=%s", name)
 		}
 		if indexCount == 0 {
 			return errors.Errorf("源表缺少以 (%s,%s) 开头的复合索引 source=%s", opts.ShardColumn, opts.CursorColumn, name)
 		}
 		var uniqueCursorCount int
-		if err := database.QueryRowContext(ctx, assetSQL("unique-cursor.sql.tmpl"), name, opts.CursorColumn).Scan(&uniqueCursorCount); err != nil {
+		if err := database.QueryRowContext(ctx, uniqueCursorQuery, name, opts.CursorColumn).Scan(&uniqueCursorCount); err != nil {
 			return errors.Wrapf(err, "校验唯一分页游标失败 source=%s column=%s", name, opts.CursorColumn)
 		}
 		if uniqueCursorCount == 0 {
@@ -328,7 +372,10 @@ func validateTarget(ctx context.Context, database *sql.DB, move sharding.Move) e
 	if err := validateTargetStructure(ctx, database, move); err != nil {
 		return err
 	}
-	query := renderSQL("count-table.sql.tmpl", map[string]string{"{{TABLE}}": quoteIdentifier(move.Target)})
+	query, err := renderSQL("count-table.sql.tmpl", map[string]string{"{{TABLE}}": quoteIdentifier(move.Target)})
+	if err != nil {
+		return err
+	}
 	var count int64
 	if err := database.QueryRowContext(ctx, query).Scan(&count); err != nil {
 		return errors.Wrapf(err, "校验目标空表失败 target=%s", move.Target)
@@ -387,7 +434,10 @@ func validateTableRoutes(
 		"{{UID}}":   quoteIdentifier(opts.UIDColumn),
 		"{{SHARD}}": quoteIdentifier(opts.ShardColumn),
 	}
-	rangeQuery := renderSQL("route-range-mismatch.sql.tmpl", replacements)
+	rangeQuery, err := renderSQL("route-range-mismatch.sql.tmpl", replacements)
+	if err != nil {
+		return err
+	}
 	var mismatch int
 	if err := database.QueryRowContext(ctx, rangeQuery, bucketStart, bucketEnd).Scan(&mismatch); err != nil {
 		return errors.Wrapf(err, "检查物理表桶范围失败 table=%s", table)
@@ -395,7 +445,10 @@ func validateTableRoutes(
 	if mismatch != 0 {
 		return errors.Errorf("物理表存在桶范围外数据 table=%s shard=%s expected_range=%d-%d", table, opts.ShardColumn, bucketStart, bucketEnd)
 	}
-	routeQuery := renderSQL("route-mismatch.sql.tmpl", replacements)
+	routeQuery, err := renderSQL("route-mismatch.sql.tmpl", replacements)
+	if err != nil {
+		return err
+	}
 	for bucket := bucketStart; bucket <= bucketEnd; bucket++ {
 		if err := database.QueryRowContext(ctx, routeQuery, bucket).Scan(&mismatch); err != nil {
 			return errors.Wrapf(err, "检查固定桶公式失败 table=%s bucket=%d", table, bucket)
@@ -415,8 +468,12 @@ func validateTableRoutes(
 
 // tableExists 判断当前数据库是否存在指定物理表。
 func tableExists(ctx context.Context, database *sql.DB, table string) (bool, error) {
+	query, err := assetSQL("table-exists.sql.tmpl")
+	if err != nil {
+		return false, err
+	}
 	var count int
-	if err := database.QueryRowContext(ctx, assetSQL("table-exists.sql.tmpl"), table).Scan(&count); err != nil {
+	if err := database.QueryRowContext(ctx, query, table).Scan(&count); err != nil {
 		return false, errors.Wrapf(err, "检查物理表失败 table=%s", table)
 	}
 	return count == 1, nil
@@ -438,7 +495,10 @@ func moveSources(moves []sharding.Move) []string {
 
 // showCreateTable 读取物理表结构定义。
 func showCreateTable(ctx context.Context, database *sql.DB, table string) (string, error) {
-	query := renderSQL("show-create-table.sql.tmpl", map[string]string{"{{TABLE}}": quoteIdentifier(table)})
+	query, err := renderSQL("show-create-table.sql.tmpl", map[string]string{"{{TABLE}}": quoteIdentifier(table)})
+	if err != nil {
+		return "", err
+	}
 	var tableName string
 	var ddl string
 	if err := database.QueryRowContext(ctx, query).Scan(&tableName, &ddl); err != nil {
@@ -458,12 +518,20 @@ func normalizeCreateTable(ddl string) string {
 func acquireLock(ctx context.Context, database *sql.DB, opts PrepareOptions) (func(), error) {
 	tableDigest := sha256.Sum256([]byte(opts.FirstTable)) // 摘要避免 MySQL 命名锁超过 64 字节
 	lockName := fmt.Sprintf("table_shard:%x", tableDigest[:16])
+	acquireQuery, err := assetSQL("acquire-lock.sql.tmpl")
+	if err != nil {
+		return nil, err
+	}
+	releaseQuery, err := assetSQL("release-lock.sql.tmpl")
+	if err != nil {
+		return nil, err
+	}
 	connection, err := database.Conn(ctx)
 	if err != nil {
 		return nil, errors.Wrapf(err, "获取拆表锁连接失败 table=%s", opts.FirstTable)
 	}
 	var acquired sql.NullInt64
-	if err := connection.QueryRowContext(ctx, assetSQL("acquire-lock.sql.tmpl"), lockName, migrationLockTimeoutSeconds).Scan(&acquired); err != nil {
+	if err := connection.QueryRowContext(ctx, acquireQuery, lockName, migrationLockTimeoutSeconds).Scan(&acquired); err != nil {
 		_ = connection.Close()
 		return nil, errors.Wrapf(err, "获取拆表互斥锁失败 table=%s", opts.FirstTable)
 	}
@@ -474,27 +542,31 @@ func acquireLock(ctx context.Context, database *sql.DB, opts PrepareOptions) (fu
 	return func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = connection.ExecContext(releaseCtx, assetSQL("release-lock.sql.tmpl"), lockName)
+		_, _ = connection.ExecContext(releaseCtx, releaseQuery, lockName)
 		_ = connection.Close()
 	}, nil
 }
 
-// assetSQL 读取固定 SQL 模板。
-func assetSQL(name string) string {
+// assetSQL 读取固定 SQL 模板；发布物缺失内嵌资产时返回错误，由拆表命令安全终止当前操作。
+func assetSQL(name string) (string, error) {
 	content, err := sqlAssets.ReadFile("assets/" + name)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrapf(err, "读取内嵌拆表 SQL 失败 asset=%s", name)
 	}
-	return embedasset.StripLeadingLineComments(string(content), "--")
+	return embedasset.StripLeadingLineComments(string(content), "--"), nil
 }
 
 // renderSQL 替换已校验并引用的 SQL 标识符占位。
-func renderSQL(name string, replacements map[string]string) string {
+func renderSQL(name string, replacements map[string]string) (string, error) {
+	query, err := assetSQL(name)
+	if err != nil {
+		return "", err
+	}
 	pairs := make([]string, 0, len(replacements)*2)
 	for key, value := range replacements {
 		pairs = append(pairs, key, value)
 	}
-	return strings.NewReplacer(pairs...).Replace(assetSQL(name))
+	return strings.NewReplacer(pairs...).Replace(query), nil
 }
 
 // quoteIdentifier 引用已经通过严格校验的 MySQL 标识符。

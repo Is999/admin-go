@@ -1,4 +1,4 @@
 interface:
   display_name: "Redis Key 治理"
-  short_description: "审查 Redis Key 归属、TTL 和扫描风险。"
-  default_prompt: "使用 $redis-key-governance 检查 Redis Key helper、registry 覆盖和高基数扫描风险。"
+  short_description: "治理 Redis Key、数据结构、TTL、失效、重建、Cluster 同槽与扫描风险。"
+  default_prompt: "使用 $redis-key-governance 复核这次 Redis Key 或缓存契约改动。"

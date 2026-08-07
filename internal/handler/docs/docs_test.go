@@ -162,7 +162,7 @@ func TestAPIDocsIndexStandalone(t *testing.T) {
 		t.Fatalf("http status = %d, want %d", recorder.Code, http.StatusOK)
 	}
 	body := recorder.Body.String()
-	for _, text := range []string{"前台 API 文档", "basePath: '/api/docs/api/'", "接口文档/前台系统/系统接口.md"} {
+	for _, text := range []string{"前台 API 文档", "basePath: '/api/docs/api/'", "文档首页.md"} {
 		if !strings.Contains(body, text) {
 			t.Fatalf("api docs index missing %q", text)
 		}
@@ -247,7 +247,7 @@ func TestFilterDocsNavigationByAccess(t *testing.T) {
 			t.Fatalf("filtered sidebar missing allowed text %q\n%s", text, body)
 		}
 	}
-	for _, text := range []string{"部署发布指南", "任务系统首页", "后台系统接口总览", "用户标签接口总览"} {
+	for _, text := range []string{"部署发布指南", "运行与操作手册", "后台系统接口总览", "用户标签接口总览"} {
 		if strings.Contains(body, text) {
 			t.Fatalf("filtered sidebar contains forbidden text %q\n%s", text, body)
 		}

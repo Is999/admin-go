@@ -1,4 +1,4 @@
 interface:
   display_name: "Go Worker 并发护栏"
-  short_description: "审查 worker、锁、重试和队列安全。"
-  default_prompt: "使用 $go-worker-concurrency-guard 复核这个 worker 或 scheduler 改动。"
+  short_description: "审查后台任务入口、状态机、锁、幂等、重试、超时、关闭与失败补偿。"
+  default_prompt: "使用 $go-worker-concurrency-guard 复核这个后台任务的并发和失败恢复边界。"

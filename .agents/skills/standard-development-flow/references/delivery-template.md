@@ -1,6 +1,6 @@
-# 交付模板
+# 结构化交付模板
 
-非平凡交付总结使用这个结构：
+非平凡交付按实际情况使用以下结构，不需要为不适用项制造内容。
 
 ```text
 完成:
@@ -8,20 +8,31 @@
 - 真实入口/调用链:
 - 修改文件:
 - 同步面:
+- 明确非目标:
 
 验证:
-- 命令:
-- 结果:
-- 未跑检查及原因:
+- 候选快照: worktree | index
+- 命令与结果:
+- 跳过检查及原因:
 
-风险:
+状态:
+- 仓库与分支:
+- staged/unstaged/untracked:
+- 保留未动的无关改动:
+
+风险与后续:
 - 剩余风险:
-- 需要观察:
+- 观察指标:
+- 发布或人工步骤:
 
-数据:
-- 是否需要迁移:
-- 是否需要重刷/补偿:
-- 是否需要缓存失效:
+数据与运行时:
+- database initialization baseline:
+- DBA/Ops local SQL handoff (ignored, not committed):
+- SQL checksum / target / order / verification / recovery:
+- backfill/compensation:
+- cache invalidation/rebuild:
+- reload/restart:
+- rollback/compensation:
 ```
 
-最终回复保持简洁。不要用泛泛的“已完成”掩盖只完成了部分实现。
+最终说明只保留修改范围、最后一次验证命令与结果、未验证/跳过/阻塞项、数据库/缓存/重启/回滚动作和责任人；禁止用笼统“已完成”掩盖部分实现、旧验证或未接通的生产入口。

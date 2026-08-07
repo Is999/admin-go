@@ -18,7 +18,7 @@ PROMETHEUS_RULES_IN_CONTAINER := $(patsubst docs/prometheus/%,/rules/%,$(PROMETH
 GOVULNCHECK_VERSION ?= v1.6.0
 GO_TOOLCHAIN ?= go1.26.5
 
-.PHONY: fmt fmt-check test test-race vet build build-tools package check ci diff-check branch-drift-check update-route-security-manifest secret-scan promtool-check govulncheck security-scan integration-env-up integration-env-down integration-test migrate-status migrate-dry-run migrate-up migrate-bootstrap clean
+.PHONY: fmt fmt-check test shardingsphere-check test-race vet build build-tools package check ci diff-check branch-drift-check update-route-security-manifest secret-scan promtool-check govulncheck security-scan integration-env-up integration-env-down integration-test migrate-status migrate-dry-run migrate-up migrate-bootstrap clean
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
@@ -26,8 +26,11 @@ fmt:
 fmt-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './vendor/*'))"
 
-test:
+test: shardingsphere-check
 	go test ./...
+
+shardingsphere-check:
+	./deploy/shardingsphere/render-global_test.sh
 
 test-race:
 	go test -race -count=1 ./...

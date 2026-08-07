@@ -9,8 +9,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// chineseTextPattern 识别注释中至少一个中文字符。
+var chineseTextPattern = regexp.MustCompile(`[\p{Han}]`)
 
 // finding 描述一处需要人工复核的注释缺口。
 type finding struct {
@@ -98,7 +102,7 @@ func isGenerated(path string) bool {
 		if trimmed == "" {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "// Code generated") || strings.HasPrefix(trimmed, "//go:generate") {
+		if strings.HasPrefix(trimmed, "// Code generated ") && strings.HasSuffix(trimmed, " DO NOT EDIT.") {
 			return true
 		}
 		if strings.HasPrefix(trimmed, "//") {
@@ -186,12 +190,12 @@ func auditStructFields(fset *token.FileSet, path string, st *ast.StructType, own
 	return findings
 }
 
-// hasDoc 判断声明或行尾是否存在有效注释。
+// hasDoc 判断声明或行尾是否存在中文说明。
 func hasDoc(doc *ast.CommentGroup, line *ast.CommentGroup) bool {
-	if doc != nil && strings.TrimSpace(doc.Text()) != "" {
+	if doc != nil && chineseTextPattern.MatchString(doc.Text()) {
 		return true
 	}
-	if line != nil && strings.TrimSpace(line.Text()) != "" {
+	if line != nil && chineseTextPattern.MatchString(line.Text()) {
 		return true
 	}
 	return false

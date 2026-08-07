@@ -1,28 +1,30 @@
-# api 项目边界
+# API 项目边界
 
-## 真实结构
+## 真实链路
 
-- HTTP 主链路从路由和 middleware 进入 `handler -> logic -> model/svc`，最终到 DB、Redis 或外部服务；审查时必须覆盖鉴权和响应语义。
-- 启动、组件状态和迁移位于 `cmd`、`internal/bootstrap`、`internal/svc`、`internal/database`；只复用项目已有接线方式。
-- `api` 是请求热路径，不复制 `admin` 的任务队列、Collector 或运行时框架。兄弟仓库只同步确实共享的安全语义，不强行抽公共层。
-- 新增或重构的变量、常量、方法、结构体、字段、map 字段、路由、GORM Model、接口和关键逻辑必须按项目规范补简洁中文注释。
+- HTTP 从 RouteSpec 进入 middleware，再到 `handler -> logic -> model/svc`，最终访问 DB、Redis 或外部服务。
+- 启动、组件状态、配置和迁移位于 `cmd`、`internal/bootstrap`、`internal/svc`、`internal/config` 和 `internal/database`。
+- API 是前台请求热路径，不复制 Admin 的任务队列、Scheduler 或运营工作流；只同步真正共享的安全、数据和缓存契约。
+- `common/localcache`、`SysConfigLogic`、`SysConfigKey` 和 table-cache 目标若当前业务 route/logic 未调用，归类为基础能力/未激活：保留共享数据与缓存契约、聚焦测试和接入文档，但不得写成生产链路已启用，也不得再建重复实现。
 
 ## 简化重点
 
-- handler 只做参数接收和响应，logic 直接表达业务规则；不为单一调用增加 service、repository 或 mapper 包装。
-- middleware 保持顺序和短路语义；鉴权、签名、加密等安全边界不能因减少查询或判断而弱化。
-- 每请求数据库或 Redis 操作先核对频率、索引、缓存一致性和即时撤销要求，再决定是否优化。
-- 迁移互斥、节点租约和 readiness 若与 `admin` 语义相同，可保持实现对齐；两个独立仓库不为消除少量重复新增共享发布依赖。
-- 错误码、响应字段、权限和接口文档属于返回语义，内部重构后必须保持一致。
-- 冷路径不以难读的微优化换取理论收益；简单直接的 Go 代码优先交给编译器内联和逃逸分析。
+- Handler 只接收参数和写响应；Logic 直接表达业务规则，不为单一调用叠加 service、repository 或 mapper 包装。
+- Middleware 保持顺序和短路语义；减少查询不能削弱鉴权、签名、加密、限流或即时撤销。
+- 每请求 DB/Redis 操作先核对频率、索引、缓存一致性和撤销时效，再决定批量、缓存或合并。
+- 迁移互斥、节点租约和 readiness 可与 Admin 对齐语义，但独立仓库不为消除少量重复增加共享发布依赖。
+- 内部重构前后逐项比较错误码、HTTP 状态、响应字段/空值、安全字段点路径和接口文档示例；需求未授权契约变化时，任何新增、删除、改名或语义变化都视为回归。
+- 冷路径不使用难读微优化；请求热路径优先减少外部 I/O、扫描和无界分配。
+
+## 不可破坏边界
+
+- JWT/session 生命周期、`auth_version`、Redis 原子操作和多实例竞态。
+- 签名/加密字段子集、大小限制、流式响应和失败业务码。
+- GORM 读写路由、事务、身份索引和表路由。
+- Admin 运行态同步与内网文档代理边界。
 
 ## 验证
 
-按改动风险选择并在最终候选版本运行：
-
-- 有代码改动时运行 `gofmt -w <修改的 Go 文件>`；只读审查只检查 `gofmt -d` 或 `gofmt -l`
-- `go test ./...`
-- `go vet ./...`
-- 并发或共享状态改动补相关包 `go test -race`
-- 迁移改动补 `make integration-test`
-- `git diff --check`、`git diff --cached --check`、`git status --short`
+- Go 改动运行 gofmt；先运行改动文件归属包与全部直接调用包测试，再执行 `go test ./...` 和 `go vet ./...`。goroutine、锁、共享状态、取消或关闭逻辑变化时，对归属包和直接调用包运行 `go test -race -count=1`。
+- 初始化执行器、初始化资产或 Model/DDL 契约改动补 `make integration-test`；安全契约变化补 manifest 与共享向量检查。
+- 最终运行 `git diff --check`、`git diff --cached --check`（存在 staged 文件时）和 `git status --short`。

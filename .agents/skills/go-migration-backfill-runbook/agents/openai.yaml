@@ -1,4 +1,4 @@
 interface:
-  display_name: "Go 迁移回填手册"
-  short_description: "安全规划 DDL、回填、回滚和补偿。"
-  default_prompt: "使用 $go-migration-backfill-runbook 安全规划这个迁移或回填任务。"
+  display_name: "Go 数据库变更交付护栏"
+  short_description: "治理初始化基线、本地 DBA SQL、回填、校验、回滚与补偿。"
+  default_prompt: "使用 $go-migration-backfill-runbook 规划初始化基线与存量库 DBA 变更交付。"

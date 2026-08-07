@@ -1,4 +1,4 @@
 interface:
   display_name: "交付收口护栏"
-  short_description: "检查验证、暂存文件和运维交接。"
-  default_prompt: "使用 $release-handoff-guard 为这次改动准备最终交付。"
+  short_description: "核对候选验证、Git 暂存、DBA SQL 与发布运维交接。"
+  default_prompt: "使用 $release-handoff-guard 收口当前改动的验证、暂存、DBA SQL 和运维交接。"

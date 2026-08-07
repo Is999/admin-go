@@ -44,13 +44,9 @@ func ParseDocResourceKey(value string) (DocResource, bool) {
 // docsResources 维护当前文档站可直接阅读的 Markdown 文档；docsify 公共资源不进入正文授权。
 var docsResources = []DocResource{
 	{Site: DocSiteAdmin, Path: "功能模块/任务系统/任务系统使用手册.md"},
-	{Site: DocSiteAdmin, Path: "功能模块/任务系统/任务系统首页.md"},
 	{Site: DocSiteAdmin, Path: "功能模块/用户标签/任务系统与用户标签排障手册.md"},
 	{Site: DocSiteAdmin, Path: "功能模块/用户标签/用户标签实现与调度说明.md"},
 	{Site: DocSiteAdmin, Path: "功能模块/用户标签/用户标签操作手册.md"},
-	{Site: DocSiteAdmin, Path: "功能模块/用户标签/用户标签首页.md"},
-	{Site: DocSiteAdmin, Path: "功能模块/用户标签/用户标签骨架验收指南.md"},
-	{Site: DocSiteAdmin, Path: "功能模块/用户标签/用户标签骨架验证指南.md"},
 	{Site: DocSiteAdmin, Path: "接口文档/任务系统/任务列表接口.md"},
 	{Site: DocSiteAdmin, Path: "接口文档/任务系统/任务总控接口.md"},
 	{Site: DocSiteAdmin, Path: "接口文档/任务系统/任务注册表接口.md"},
@@ -95,6 +91,7 @@ var docsResources = []DocResource{
 	{Site: DocSiteAdmin, Path: "角色文档/后端开发/配置字段说明.md"},
 	{Site: DocSiteAdmin, Path: "角色文档/运维/数据库迁移治理.md"},
 	{Site: DocSiteAdmin, Path: "角色文档/运维/部署发布指南.md"},
+	{Site: DocSiteAPI, Path: "文档首页.md"},
 	{Site: DocSiteAPI, Path: "接口文档/前台系统/健康检查接口.md"},
 	{Site: DocSiteAPI, Path: "接口文档/前台系统/用户接口.md"},
 	{Site: DocSiteAPI, Path: "接口文档/前台系统/系统接口.md"},

@@ -77,7 +77,7 @@ func periodicModelToConfig(row model.RuntimeTaskPeriodic) config.TaskPeriodicCon
 	}
 }
 
-// periodicConfigToModel 把运行配置项导入为周期任务草稿模型。
+// periodicConfigToModel 把发布快照中的周期任务转换为草稿模型，供回滚版本写回草稿使用。
 func periodicConfigToModel(item config.TaskPeriodicConfig, adminID int, index int) model.RuntimeTaskPeriodic {
 	return model.RuntimeTaskPeriodic{
 		Name:             strings.TrimSpace(item.Name),
@@ -248,7 +248,7 @@ func archiveModelToConfig(row model.RuntimeArchiveJob) config.ArchiveJobConfig {
 	}
 }
 
-// archiveConfigToModel 把运行配置项导入为归档任务草稿模型。
+// archiveConfigToModel 把发布快照中的归档任务转换为草稿模型，供回滚版本写回草稿使用。
 func archiveConfigToModel(item config.ArchiveJobConfig, adminID int, index int) model.RuntimeArchiveJob {
 	item = normalizeArchiveConfigDefaults(item)
 	database := strings.TrimSpace(item.Database)

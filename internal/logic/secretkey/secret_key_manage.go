@@ -29,6 +29,13 @@ import (
 const (
 	// secretKeyRSASignCheckPayload 是后台秘钥自检时统一使用的 RSA 待签名字符串，便于日志和自检结果对齐。
 	secretKeyRSASignCheckPayload = "admin-sign-check"
+	// maxSecretKeyVersionCount 限制每个 AppID 最多保存一百个材料版本；达到上限后仍允许编辑已有版本，但拒绝创建新版本。
+	maxSecretKeyVersionCount = 100
+)
+
+var (
+	// errSecretKeyVersionCountLimit 标识 AppID 的材料版本达到业务上限，调用层据此返回参数错误而不是数据库故障。
+	errSecretKeyVersionCountLimit = errors.New("秘钥版本数量达到上限")
 )
 
 // NewSecretKeyManageLogic 创建秘钥管理业务逻辑对象。
@@ -251,6 +258,13 @@ func (l *SecretKeyLogic) Update(req *types.SaveSecretKeyReq) *types.BizResult {
 			return errors.Wrap(err, "查询秘钥版本失败")
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			var versionCount int64
+			if err := tx.Model(&model.SecretKeyVersion{}).Where("secret_key_id = ?", req.ID).Count(&versionCount).Error; err != nil {
+				return errors.Wrap(err, "统计秘钥版本数量失败")
+			}
+			if err := validateSecretKeyVersionCapacity(versionCount); err != nil {
+				return errors.Tag(err)
+			}
 			versionRow = model.SecretKeyVersion{
 				SecretKeyID:            req.ID,
 				UUID:                   req.UUID,
@@ -284,6 +298,10 @@ func (l *SecretKeyLogic) Update(req *types.SaveSecretKeyReq) *types.BizResult {
 		}
 		return nil
 	}); err != nil {
+		if errors.Is(err, errSecretKeyVersionCountLimit) {
+			return types.ParamErrorResult(err).
+				WithError(corelogic.WrapLogicError(err, "SecretKeyLogic.Update 秘钥版本数量校验失败"))
+		}
 		return types.DBError(i18n.MsgKeyDBErrorFormat, err,
 			"SecretKeyLogic.Update 更新秘钥ID[%d]失败", req.ID).ToBizResult()
 	}
@@ -294,6 +312,14 @@ func (l *SecretKeyLogic) Update(req *types.SaveSecretKeyReq) *types.BizResult {
 	}
 	return types.NewBizResult(codes.UpdateSuccess).
 		SetI18nMessage(i18n.MsgKeyUpdateSuccess)
+}
+
+// validateSecretKeyVersionCapacity 校验新版本写入前的现有数量；count 等于一百时必须拒绝，防止缓存刷新和列表读取继续无界增长。
+func validateSecretKeyVersionCapacity(count int64) error {
+	if count >= maxSecretKeyVersionCount {
+		return errors.Wrapf(errSecretKeyVersionCountLimit, "每个 AppID 最多保存 %d 个秘钥版本", maxSecretKeyVersionCount)
+	}
+	return nil
 }
 
 // UpdateStatus 修改秘钥状态，并同步刷新运行时缓存。

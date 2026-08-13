@@ -132,14 +132,22 @@ const (
 
 // normalizePage 归一化页码和每页数量，调用方可按业务场景指定默认每页数量。
 func normalizePage(page, pageSize, defaultSize int) (int, int) {
+	return normalizePageWithMax(page, pageSize, defaultSize, maxPageSize)
+}
+
+// normalizePageWithMax 归一化页码和每页数量，maxSize 只能由有明确查询负载边界的业务列表指定。
+func normalizePageWithMax(page, pageSize, defaultSize, maxSize int) (int, int) {
 	if page < 1 {
 		page = defaultPageNumber
 	}
 	if pageSize < 1 {
 		pageSize = defaultSize
 	}
-	if pageSize > maxPageSize {
-		pageSize = maxPageSize
+	if maxSize < 1 {
+		maxSize = maxPageSize
+	}
+	if pageSize > maxSize {
+		pageSize = maxSize
 	}
 	return page, pageSize
 }

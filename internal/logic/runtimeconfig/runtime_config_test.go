@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,8 @@ import (
 	tasklimits "admin/internal/task/limits"
 	"admin/internal/types"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -69,6 +73,19 @@ func TestRuntimeConfigSnapshotEmpty(t *testing.T) {
 	}
 	if runtimeConfigSnapshotEmpty(ReleaseSnapshot{ArchiveJobs: []config.ArchiveJobConfig{{Name: "archive"}}}) {
 		t.Fatal("包含归档任务的快照不应判定为空")
+	}
+}
+
+// TestOverviewRejectsUnavailableActiveState 验证 active 状态依赖不可用时返回受控失败，不能以零版本概览伪装查询成功。
+func TestOverviewRejectsUnavailableActiveState(t *testing.T) {
+	svcCtx := svc.NewServiceContext(config.Config{}, svc.Dependencies{})
+	logicObj := NewRuntimeConfigLogicWithContext(context.Background(), svcCtx)
+	result := logicObj.Overview(&types.RuntimeConfigOverviewReq{})
+	if result == nil || !result.IsFailure() {
+		t.Fatalf("Overview() result = %+v, want controlled failure", result)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "active 状态") {
+		t.Fatalf("Overview() error = %v, want active state dependency error", result.Error)
 	}
 }
 
@@ -179,6 +196,65 @@ func TestValidateSnapshotRejectsTooManyPeriodicTasks(t *testing.T) {
 	}
 }
 
+// TestValidateSnapshotAcceptsExactTaskLimits 验证一万条周期任务和一万条归档任务是可发布边界而不是越界值。
+func TestValidateSnapshotAcceptsExactTaskLimits(t *testing.T) {
+	periodicItems := make([]config.TaskPeriodicConfig, tasklimits.MaxPeriodicCount)
+	for index := range periodicItems {
+		periodicItems[index] = config.TaskPeriodicConfig{
+			Name:     fmt.Sprintf("periodic-%d", index),
+			Cron:     "0 * * * *",
+			Workflow: "demo.workflow",
+		}
+	}
+	archiveItems := make([]config.ArchiveJobConfig, tasklimits.MaxArchiveJobCount)
+	for index := range archiveItems {
+		archiveItems[index] = config.ArchiveJobConfig{
+			Name:      fmt.Sprintf("archive-%d", index),
+			TableName: "demo_table",
+		}
+	}
+	if _, err := ValidateSnapshot(ReleaseSnapshot{TaskPeriodic: periodicItems, ArchiveJobs: archiveItems}); err != nil {
+		t.Fatalf("ValidateSnapshot() exact limits error = %v", err)
+	}
+	_, jsonText, yamlText, _, err := encodeReleaseSnapshot(ReleaseSnapshot{TaskPeriodic: periodicItems, ArchiveJobs: archiveItems})
+	if err != nil {
+		t.Fatalf("encodeReleaseSnapshot() exact limits error = %v", err)
+	}
+	if len(jsonText) > maxRuntimeConfigSnapshotBytes || len(yamlText) > maxRuntimeConfigSnapshotBytes {
+		t.Fatalf("exact limit snapshot exceeds storage boundary: json=%d yaml=%d", len(jsonText), len(yamlText))
+	}
+	t.Logf("exact limit snapshot bytes: json=%d yaml=%d", len(jsonText), len(yamlText))
+}
+
+// TestEncodeSnapshotRejectsOversizedSerializedPayload 验证字段内容过大时在写 MySQL 和 Redis 前返回明确边界错误。
+func TestEncodeSnapshotRejectsOversizedSerializedPayload(t *testing.T) {
+	snapshot := ReleaseSnapshot{ArchiveJobs: []config.ArchiveJobConfig{{
+		Name:             "oversized-archive",
+		TableName:        "demo_table",
+		ArchiveCondition: strings.Repeat("x", maxRuntimeConfigSnapshotBytes),
+	}}}
+	if _, _, _, err := EncodeSnapshot(snapshot); err == nil || !strings.Contains(err.Error(), "JSON 快照不能超过") {
+		t.Fatalf("EncodeSnapshot() error = %v, want encoded size limit", err)
+	}
+}
+
+// TestValidateSnapshotRejectsTooManyArchiveJobs 校验归档任务数量不能绕过草稿覆盖、回滚和发布共用的快照边界。
+func TestValidateSnapshotRejectsTooManyArchiveJobs(t *testing.T) {
+	items := make([]config.ArchiveJobConfig, tasklimits.MaxArchiveJobCount+1)
+	if _, err := ValidateSnapshot(ReleaseSnapshot{ArchiveJobs: items}); err == nil || !strings.Contains(err.Error(), "归档任务不能超过") {
+		t.Fatalf("ValidateSnapshot() error = %v, want archive count limit", err)
+	}
+}
+
+// TestPublishSnapshotRejectsOversizedSnapshotBeforeDatabase 验证回滚或启动发布的越界快照在打开写事务前失败。
+func TestPublishSnapshotRejectsOversizedSnapshotBeforeDatabase(t *testing.T) {
+	logicObj := &RuntimeConfigLogic{}
+	snapshot := ReleaseSnapshot{ArchiveJobs: make([]config.ArchiveJobConfig, tasklimits.MaxArchiveJobCount+1)}
+	if _, err := logicObj.publishSnapshot(snapshot, "test", 0); err == nil || !strings.Contains(err.Error(), "归档任务不能超过") {
+		t.Fatalf("publishSnapshot() error = %v, want archive count limit", err)
+	}
+}
+
 // TestPublishSnapshotRejectsRuntimeInvalidPeriodicConfig 验证发布写库前会执行任务运行时校验。
 func TestPublishSnapshotRejectsRuntimeInvalidPeriodicConfig(t *testing.T) {
 	validator := &runtimeConfigTaskQueueStub{validationErr: errors.New("workflow shard_total max=1")}
@@ -197,48 +273,6 @@ func TestPublishSnapshotRejectsRuntimeInvalidPeriodicConfig(t *testing.T) {
 	}
 	if validator.validateCalls != 1 {
 		t.Fatalf("运行时周期任务校验调用次数 = %d, want 1", validator.validateCalls)
-	}
-}
-
-// TestInitialReleaseSnapshotPrefersDraftTables 验证首次启动优先发布迁移种下的草稿表。
-func TestInitialReleaseSnapshotPrefersDraftTables(t *testing.T) {
-	draft := ReleaseSnapshot{TaskPeriodic: []config.TaskPeriodicConfig{{Name: "draft-periodic"}}}
-	file := ReleaseSnapshot{TaskPeriodic: []config.TaskPeriodicConfig{{Name: "file-periodic"}}}
-	got, replaceDraft, remark := initialReleaseSnapshot(draft, file)
-	if replaceDraft {
-		t.Fatal("草稿表已有数据时不应被文件快照覆盖")
-	}
-	if remark != "bootstrap publish runtime config draft" {
-		t.Fatalf("remark = %q, want draft remark", remark)
-	}
-	if len(got.TaskPeriodic) != 1 || got.TaskPeriodic[0].Name != "draft-periodic" {
-		t.Fatalf("initialReleaseSnapshot() = %+v, want draft snapshot", got)
-	}
-}
-
-// TestInitialReleaseSnapshotFallsBackToFileSeed 验证草稿为空时仍兼容旧的文件首次导入。
-func TestInitialReleaseSnapshotFallsBackToFileSeed(t *testing.T) {
-	file := ReleaseSnapshot{ArchiveJobs: []config.ArchiveJobConfig{{Name: "file-archive"}}}
-	got, replaceDraft, remark := initialReleaseSnapshot(ReleaseSnapshot{}, file)
-	if !replaceDraft {
-		t.Fatal("使用文件种子时应先写回草稿表")
-	}
-	if remark != "bootstrap import current runtime config" {
-		t.Fatalf("remark = %q, want file import remark", remark)
-	}
-	if len(got.ArchiveJobs) != 1 || got.ArchiveJobs[0].Name != "file-archive" {
-		t.Fatalf("initialReleaseSnapshot() = %+v, want file snapshot", got)
-	}
-}
-
-// TestInitialReleaseSnapshotEmptySources 验证文件和草稿都为空时保留明确失败分支。
-func TestInitialReleaseSnapshotEmptySources(t *testing.T) {
-	got, replaceDraft, remark := initialReleaseSnapshot(ReleaseSnapshot{}, ReleaseSnapshot{})
-	if !runtimeConfigSnapshotEmpty(got) {
-		t.Fatalf("initialReleaseSnapshot() = %+v, want empty snapshot", got)
-	}
-	if replaceDraft || remark != "" {
-		t.Fatalf("replaceDraft=%v remark=%q, want empty metadata", replaceDraft, remark)
 	}
 }
 
@@ -357,7 +391,7 @@ func TestEncodeReleaseSnapshotNormalizesDefaults(t *testing.T) {
 	}
 }
 
-// TestPeriodicConfigToModelDefaultsEnabled 验证运行配置首次导入草稿时周期任务默认启用。
+// TestPeriodicConfigToModelDefaultsEnabled 验证全量写入运行配置草稿时周期任务默认启用。
 func TestPeriodicConfigToModelDefaultsEnabled(t *testing.T) {
 	row := periodicConfigToModel(config.TaskPeriodicConfig{
 		Name:     "archive-admin-log-hourly",
@@ -365,7 +399,7 @@ func TestPeriodicConfigToModelDefaultsEnabled(t *testing.T) {
 		Workflow: "archive.run",
 	}, 7, 0)
 	if !row.Enabled {
-		t.Fatal("期望缺省 enabled 的周期任务导入草稿时默认启用")
+		t.Fatal("期望缺省 enabled 的周期任务写入草稿时默认启用")
 	}
 }
 
@@ -408,4 +442,216 @@ func TestRuntimeConfigReloadMatchesRelease(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPublishPreparedSnapshotSerializesConcurrentDraftSave 验证发布持有状态行锁期间，并发保存必须等待到版本提交后再修改草稿。
+func TestPublishPreparedSnapshotSerializesConcurrentDraftSave(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("INTEGRATION_MYSQL_DSN"))
+	if dsn == "" {
+		t.Skip("INTEGRATION_MYSQL_DSN 未配置")
+	}
+	db := openRuntimeConfigIntegrationDB(t, dsn)
+	if err := db.AutoMigrate(
+		&model.RuntimeConfigState{},
+		&model.RuntimeConfigRelease{},
+		&model.RuntimeTaskPeriodic{},
+		&model.RuntimeArchiveJob{},
+	); err != nil {
+		t.Fatalf("初始化运行配置并发测试表失败: %v", err)
+	}
+	if err := db.Create(&model.RuntimeConfigState{ID: 1, PublishedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("写入运行配置状态失败: %v", err)
+	}
+	if err := db.Create(&model.RuntimeTaskPeriodic{
+		Name:     "before-publish",
+		Enabled:  true,
+		Cron:     "0 * * * *",
+		Workflow: "demo.workflow",
+	}).Error; err != nil {
+		t.Fatalf("写入发布前草稿失败: %v", err)
+	}
+
+	svcCtx := svc.NewServiceContext(config.Config{}, svc.Dependencies{
+		SiteDBs: svc.SiteDatabases{MainDB: db},
+	})
+	logicObj := NewRuntimeConfigLogicWithContext(context.Background(), svcCtx)
+	lockHeld := make(chan struct{})
+	continuePublish := make(chan struct{})
+	publishDone := make(chan error, 1)
+	go func() {
+		_, publishErr := logicObj.publishPreparedSnapshot(func(tx *gorm.DB) (preparedRuntimeConfigSnapshot, error) {
+			close(lockHeld)
+			<-continuePublish
+			snapshot, buildErr := logicObj.buildDraftSnapshotDB(tx)
+			if buildErr != nil {
+				return preparedRuntimeConfigSnapshot{}, buildErr
+			}
+			return logicObj.prepareSnapshot(snapshot)
+		}, nil, "atomic publish test", 0)
+		publishDone <- publishErr
+	}()
+	select {
+	case <-lockHeld:
+	case <-time.After(5 * time.Second):
+		t.Fatal("发布事务未在五秒内取得状态行锁")
+	}
+
+	saveDone := make(chan *types.BizResult, 1)
+	go func() {
+		saveDone <- logicObj.SavePeriodicTask(&types.SaveRuntimeTaskPeriodicReq{
+			Name:     "after-publish",
+			Enabled:  true,
+			Cron:     "5 * * * *",
+			Workflow: "demo.workflow",
+		})
+	}()
+	select {
+	case result := <-saveDone:
+		t.Fatalf("并发保存越过发布状态行锁: %+v", result)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(continuePublish)
+	if err := <-publishDone; err != nil {
+		t.Fatalf("发布事务失败: %v", err)
+	}
+	select {
+	case result := <-saveDone:
+		if result == nil || result.IsFailure() {
+			t.Fatalf("发布提交后的并发保存失败: %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("并发保存未在发布提交后五秒内完成")
+	}
+
+	var release model.RuntimeConfigRelease
+	if err := db.Order("version_no DESC").First(&release).Error; err != nil {
+		t.Fatalf("读取发布版本失败: %v", err)
+	}
+	snapshot, err := DecodeSnapshotJSON(release.SnapshotJSON)
+	if err != nil {
+		t.Fatalf("解析发布快照失败: %v", err)
+	}
+	if len(snapshot.TaskPeriodic) != 1 || snapshot.TaskPeriodic[0].Name != "before-publish" {
+		t.Fatalf("发布快照混入锁后并发保存内容: %+v", snapshot.TaskPeriodic)
+	}
+	var draftCount int64
+	if err = db.Model(&model.RuntimeTaskPeriodic{}).Count(&draftCount).Error; err != nil {
+		t.Fatalf("统计发布后草稿失败: %v", err)
+	}
+	if draftCount != 2 {
+		t.Fatalf("发布后草稿数量=%d want 2", draftCount)
+	}
+}
+
+// TestPublishInitialDraftAvoidsDuplicateRelease 验证两个实例并发首次发布时只有一个实例创建 release，另一个识别既有 active 版本。
+func TestPublishInitialDraftAvoidsDuplicateRelease(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("INTEGRATION_MYSQL_DSN"))
+	if dsn == "" {
+		t.Skip("INTEGRATION_MYSQL_DSN 未配置")
+	}
+	db := openRuntimeConfigIntegrationDB(t, dsn)
+	if err := db.AutoMigrate(
+		&model.RuntimeConfigState{},
+		&model.RuntimeConfigRelease{},
+		&model.RuntimeTaskPeriodic{},
+		&model.RuntimeArchiveJob{},
+	); err != nil {
+		t.Fatalf("初始化运行配置首次发布测试表失败: %v", err)
+	}
+	if err := db.Create(&model.RuntimeConfigState{ID: 1, PublishedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("写入运行配置状态失败: %v", err)
+	}
+	if err := db.Create(&model.RuntimeTaskPeriodic{
+		Name:     "initial-periodic",
+		Enabled:  true,
+		Cron:     "0 * * * *",
+		Workflow: "demo.workflow",
+	}).Error; err != nil {
+		t.Fatalf("写入初始化草稿失败: %v", err)
+	}
+
+	svcCtx := svc.NewServiceContext(config.Config{}, svc.Dependencies{
+		SiteDBs: svc.SiteDatabases{MainDB: db},
+	})
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			logicObj := NewRuntimeConfigLogicWithContext(context.Background(), svcCtx)
+			_, err := logicObj.publishInitialDraft()
+			results <- err
+		}()
+	}
+	close(start)
+	successes := 0
+	alreadyPublished := 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, errRuntimeConfigInitialReleaseExists):
+			alreadyPublished++
+		default:
+			t.Fatalf("并发首次发布返回非预期错误: %v", err)
+		}
+	}
+	if successes != 1 || alreadyPublished != 1 {
+		t.Fatalf("首次发布结果 success=%d already_published=%d want 1/1", successes, alreadyPublished)
+	}
+	var releaseCount int64
+	if err := db.Model(&model.RuntimeConfigRelease{}).Count(&releaseCount).Error; err != nil {
+		t.Fatalf("统计初始化 release 失败: %v", err)
+	}
+	if releaseCount != 1 {
+		t.Fatalf("初始化 release 数量=%d want 1", releaseCount)
+	}
+	var state model.RuntimeConfigState
+	if err := db.First(&state, 1).Error; err != nil {
+		t.Fatalf("读取初始化 active 状态失败: %v", err)
+	}
+	if state.ActiveReleaseID == 0 || state.ActiveVersion != 1 {
+		t.Fatalf("初始化 active 状态=%+v want release_id>0 version=1", state)
+	}
+}
+
+// openRuntimeConfigIntegrationDB 为并发测试创建独立数据库，结束后关闭连接并删除，不修改共享测试库中的业务表。
+func openRuntimeConfigIntegrationDB(t *testing.T, dsn string) *gorm.DB {
+	t.Helper()
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("解析集成测试 DSN 失败: %v", err)
+	}
+	databaseName := fmt.Sprintf("runtime_config_atomic_%d", time.Now().UnixNano())
+	adminConfig := *parsed
+	adminConfig.DBName = ""
+	adminDB, err := sql.Open("mysql", adminConfig.FormatDSN())
+	if err != nil {
+		t.Fatalf("打开集成测试管理连接失败: %v", err)
+	}
+	if _, err = adminDB.Exec("CREATE DATABASE `" + databaseName + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"); err != nil {
+		_ = adminDB.Close()
+		t.Fatalf("创建独立运行配置测试库失败: %v", err)
+	}
+	testConfig := *parsed
+	testConfig.DBName = databaseName
+	db, err := gorm.Open(gormmysql.Open(testConfig.FormatDSN()), &gorm.Config{})
+	if err != nil {
+		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS `" + databaseName + "`")
+		_ = adminDB.Close()
+		t.Fatalf("打开独立运行配置测试库失败: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS `" + databaseName + "`")
+		_ = adminDB.Close()
+		t.Fatalf("获取独立运行配置 SQL 连接失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS `" + databaseName + "`")
+		_ = adminDB.Close()
+	})
+	return db
 }

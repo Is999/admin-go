@@ -11,10 +11,10 @@ import (
 
 // GetOverviewHandler 查询运行配置概览。
 func GetOverviewHandler(sCtx *svc.ServiceContext) http.HandlerFunc {
-	return shared.ActionLogHandler(shared.RuntimeConfigOverview, func(r *http.Request) (shared.LogicObj, *types.BizResult) {
+	return shared.ActionHandler[types.RuntimeConfigOverviewReq](shared.RuntimeConfigOverview, func(r *http.Request, sCtx *svc.ServiceContext, req *types.RuntimeConfigOverviewReq) (shared.LogicObj, *types.BizResult) {
 		logicObj := runtimeconfiglogic.NewRuntimeConfigLogic(r, sCtx)
-		return logicObj, logicObj.Overview().WithReq(shared.ActionReq("runtime_config_overview"))
-	})
+		return logicObj, logicObj.Overview(req)
+	})(sCtx)
 }
 
 // ListPeriodicTasksHandler 查询周期任务草稿。
@@ -110,13 +110,5 @@ func RollbackHandler(sCtx *svc.ServiceContext) http.HandlerFunc {
 	return shared.ActionHandler[types.RuntimeConfigRollbackReq](shared.RuntimeConfigRollback, func(r *http.Request, sCtx *svc.ServiceContext, req *types.RuntimeConfigRollbackReq) (shared.LogicObj, *types.BizResult) {
 		logicObj := runtimeconfiglogic.NewRuntimeConfigLogic(r, sCtx)
 		return logicObj, logicObj.Rollback(req)
-	})(sCtx)
-}
-
-// ImportCurrentHandler 导入当前运行配置并发布。
-func ImportCurrentHandler(sCtx *svc.ServiceContext) http.HandlerFunc {
-	return shared.ActionHandler[types.RuntimeConfigImportReq](shared.RuntimeConfigImport, func(r *http.Request, sCtx *svc.ServiceContext, req *types.RuntimeConfigImportReq) (shared.LogicObj, *types.BizResult) {
-		logicObj := runtimeconfiglogic.NewRuntimeConfigLogic(r, sCtx)
-		return logicObj, logicObj.ImportCurrent(req)
 	})(sCtx)
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,17 @@ import (
 	"admin/internal/svc"
 	"admin/internal/types"
 )
+
+// TestValidateSecretKeyVersionCapacity 验证每个 AppID 的第一百个版本可存在，但不能再创建第一百零一个版本。
+func TestValidateSecretKeyVersionCapacity(t *testing.T) {
+	if err := validateSecretKeyVersionCapacity(maxSecretKeyVersionCount - 1); err != nil {
+		t.Fatalf("第 %d 个现有版本后仍应允许创建新版本: %v", maxSecretKeyVersionCount-1, err)
+	}
+	err := validateSecretKeyVersionCapacity(maxSecretKeyVersionCount)
+	if err == nil || !errors.Is(err, errSecretKeyVersionCountLimit) {
+		t.Fatalf("现有版本达到 %d 时应返回数量上限错误: %v", maxSecretKeyVersionCount, err)
+	}
+}
 
 // TestCheckSecretKeyPayloadKeepsValidationSemantics 验证拆分后的校验流程保持字段清洗、分项顺序和启用判断。
 func TestCheckSecretKeyPayloadKeepsValidationSemantics(t *testing.T) {

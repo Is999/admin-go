@@ -12,16 +12,26 @@ import (
 	"github.com/Is999/go-utils/errors"
 )
 
+const (
+	// runtimeConfigMaxPageSize 仅放宽周期任务和归档任务草稿列表到五百条，发布历史等通用列表仍使用一百条上限。
+	runtimeConfigMaxPageSize = 500
+)
+
+// RuntimeConfigOverviewReq 查询运行配置概览；完整快照只在对比或详情场景显式请求。
+type RuntimeConfigOverviewReq struct {
+	IncludeSnapshots bool `form:"includeSnapshots,optional"` // 是否返回 active 与草稿全量快照；默认 false，最大可能各含一万条任务
+}
+
 // RuntimeConfigOverviewResp 返回运行配置来源、active 版本、草稿统计和快照对比数据。
 type RuntimeConfigOverviewResp struct {
 	Source              string                  `json:"source"`              // 配置来源：file 或 database
 	PollIntervalSeconds int                     `json:"pollIntervalSeconds"` // DB 模式轻量轮询间隔秒数
 	State               RuntimeConfigStateItem  `json:"state"`               // 当前 active 版本状态
 	Draft               RuntimeConfigDraftCount `json:"draft"`               // 草稿配置数量
-	CurrentSnapshot     RuntimeConfigSnapshot   `json:"currentSnapshot"`     // 当前运行态快照，仅包含大列表配置
-	DraftSnapshot       RuntimeConfigSnapshot   `json:"draftSnapshot"`       // 当前全量草稿快照，仅包含大列表配置
-	DraftChecksum       string                  `json:"draftChecksum"`       // 草稿快照 SHA256，与预检和发布口径一致
-	DraftChanged        bool                    `json:"draftChanged"`        // 草稿快照是否不同于当前 active 快照
+	CurrentSnapshot     RuntimeConfigSnapshot   `json:"currentSnapshot"`     // includeSnapshots=true 时返回当前运行态全量快照，否则为空列表
+	DraftSnapshot       RuntimeConfigSnapshot   `json:"draftSnapshot"`       // includeSnapshots=true 时返回当前草稿全量快照，否则为空列表
+	DraftChecksum       string                  `json:"draftChecksum"`       // includeSnapshots=true 时返回草稿快照 SHA256
+	DraftChanged        bool                    `json:"draftChanged"`        // includeSnapshots=true 时表示草稿 checksum 是否不同于 active
 }
 
 // RuntimeConfigDraftCount 表示当前草稿配置数量。
@@ -56,7 +66,8 @@ type RuntimeTaskPeriodicQueryReq struct {
 func (r *RuntimeTaskPeriodicQueryReq) Validate() error {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.Keyword = strings.TrimSpace(r.Keyword)
-	return r.GetPageReq.Validate()
+	r.Page, r.PageSize = normalizePageWithMax(r.Page, r.PageSize, defaultPageSize, runtimeConfigMaxPageSize)
+	return nil
 }
 
 // SaveRuntimeTaskPeriodicReq 保存周期任务草稿。
@@ -152,7 +163,8 @@ type RuntimeArchiveJobQueryReq struct {
 func (r *RuntimeArchiveJobQueryReq) Validate() error {
 	r.Database = strings.TrimSpace(r.Database)
 	r.Keyword = strings.TrimSpace(r.Keyword)
-	return r.GetPageReq.Validate()
+	r.Page, r.PageSize = normalizePageWithMax(r.Page, r.PageSize, defaultPageSize, runtimeConfigMaxPageSize)
+	return nil
 }
 
 // SaveRuntimeArchiveJobReq 保存归档任务草稿。
@@ -285,21 +297,6 @@ func (r *RuntimeConfigRollbackReq) Validate() error {
 	return nil
 }
 
-// RuntimeConfigImportReq 导入当前文件运行配置并发布。
-type RuntimeConfigImportReq struct {
-	Remark       string `json:"remark,optional"`       // 导入备注
-	TwoStepKey   string `json:"twoStepKey,optional"`   // MFA 二次票据 key
-	TwoStepValue string `json:"twoStepValue,optional"` // MFA 二次票据 value
-}
-
-// Validate 校验导入参数。
-func (r *RuntimeConfigImportReq) Validate() error {
-	r.Remark = strings.TrimSpace(r.Remark)
-	r.TwoStepKey = strings.TrimSpace(r.TwoStepKey)
-	r.TwoStepValue = strings.TrimSpace(r.TwoStepValue)
-	return nil
-}
-
 // RuntimeConfigValidateResp 表示运行配置预检结果。
 type RuntimeConfigValidateResp struct {
 	Valid    bool     `json:"valid"`    // 是否通过预检
@@ -307,7 +304,7 @@ type RuntimeConfigValidateResp struct {
 	Checksum string   `json:"checksum"` // 草稿快照 SHA256
 }
 
-// RuntimeConfigPublishResp 表示发布、回滚和导入的回执。
+// RuntimeConfigPublishResp 表示发布和回滚的回执。
 type RuntimeConfigPublishResp struct {
 	ReleaseID       uint64 `json:"releaseId"`       // 新发布 ID
 	VersionNo       uint64 `json:"versionNo"`       // 新版本号

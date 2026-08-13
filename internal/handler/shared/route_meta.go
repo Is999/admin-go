@@ -292,8 +292,6 @@ var (
 	RuntimeConfigPublish = newAuditRouteMeta("runtime.config.publish", model.ActionRuntimeConfigPublish, "发布运行配置")
 	// RuntimeConfigRollback 回滚运行配置。
 	RuntimeConfigRollback = newAuditRouteMeta("runtime.config.rollback", model.ActionRuntimeConfigRollback, "回滚运行配置")
-	// RuntimeConfigImport 导入运行配置。
-	RuntimeConfigImport = newAuditRouteMeta("runtime.config.import", model.ActionRuntimeConfigImport, "导入运行配置")
 	// TaskQueuePause 暂停任务队列。
 	TaskQueuePause = newAuditRouteMeta("task.queue.pause", model.ActionTaskQueuePause, "暂停任务队列")
 	// TaskQueueResume 恢复任务队列。

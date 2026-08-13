@@ -16,7 +16,7 @@ PROMTOOL_IMAGE ?= prom/prometheus:v2.55.1
 PROMETHEUS_RULES := $(wildcard docs/prometheus/*.yml)
 PROMETHEUS_RULES_IN_CONTAINER := $(patsubst docs/prometheus/%,/rules/%,$(PROMETHEUS_RULES))
 GOVULNCHECK_VERSION ?= v1.6.0
-GO_TOOLCHAIN ?= go1.26.5
+GO_TOOLCHAIN ?= go1.26.6
 
 .PHONY: fmt fmt-check test shardingsphere-check test-race vet build build-tools package check ci diff-check branch-drift-check update-route-security-manifest secret-scan promtool-check govulncheck security-scan integration-env-up integration-env-down integration-test migrate-status migrate-dry-run migrate-up migrate-bootstrap clean
 
@@ -97,6 +97,7 @@ integration-test: integration-env-up
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/infra/collectorx
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 -tags=integration ./internal/jobs/archive
 	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 ./internal/sharding/migration
+	INTEGRATION_MYSQL_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 ./internal/logic/runtimeconfig -run '^(TestPublishPreparedSnapshotSerializesConcurrentDraftSave|TestPublishInitialDraftAvoidsDuplicateRelease)$$'
 	SHARD_BACKFILL_TEST_DSN='$(INTEGRATION_MYSQL_DSN)' go test -count=1 ./cmd/shardbackfill -run '^TestBackfillResumesAndVerifiesOnMySQL$$'
 
 MIGRATE_CONFIG ?= ./etc/config.yaml

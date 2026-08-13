@@ -116,14 +116,14 @@ hot_reload:
   # 配置文件轮询间隔，单位秒。
   check_interval_seconds: 5
 
-# 外部运行期配置文件，参与热加载。
+# 外部工作流配置文件，参与热加载；不承载周期任务和归档任务。
 config_files:
-  # 运行期配置文件路径。
+  # 工作流配置文件路径。
   runtime: "config.d/runtime.yaml"
 
-# 运行期大列表配置来源；本样例显式走 database，由运行配置发布快照接管周期任务和归档任务。
+# 运行期大列表配置来源；生产使用 database，由运行配置发布快照接管周期任务和归档任务。
 runtime_config:
-  # database=使用发布快照覆盖周期任务和归档任务；首次无 active release 时会导入当前运行期文件作为初始版本。
+  # database=使用发布快照覆盖周期任务和归档任务；首次无 active release 时发布数据库初始化草稿。
   source: "database"
   # DB 模式只轮询版本状态，版本变化才读取发布快照。
   poll_interval_seconds: 30

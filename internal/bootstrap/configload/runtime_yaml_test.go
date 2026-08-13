@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestLoadConfigMergesRuntimeConfigFile 确保主配置可以引用单个外部运行期配置文件。
-func TestLoadConfigMergesRuntimeConfigFile(t *testing.T) {
+// TestLoadConfigOnlyMergesRuntimeWorkflowFile 确保外部运行文件只覆盖 workflows，不再读取周期任务和归档任务。
+func TestLoadConfigOnlyMergesRuntimeWorkflowFile(t *testing.T) {
 	mainFile := writeRuntimeConfigFiles(t, "", `
 task_periodic:
   - name: "external-periodic"
@@ -27,11 +27,11 @@ workflows:
 	if err != nil {
 		t.Fatalf("加载配置失败: %v", err)
 	}
-	if got := len(cfg.Task.Periodic); got != 1 {
-		t.Fatalf("期望加载 1 个周期任务，实际为 %d", got)
+	if got := len(cfg.Task.Periodic); got != 0 {
+		t.Fatalf("外部运行文件不应加载周期任务，实际为 %d", got)
 	}
-	if got := len(cfg.Archive.Jobs); got != 1 {
-		t.Fatalf("期望加载 1 个归档任务，实际为 %d", got)
+	if got := len(cfg.Archive.Jobs); got != 0 {
+		t.Fatalf("外部运行文件不应加载归档任务，实际为 %d", got)
 	}
 	if !cfg.Workflows.UserTag.Enabled || cfg.Workflows.UserTag.DefaultShardTotal != 16 {
 		t.Fatalf("期望外部 workflows.user_tag 覆盖主配置，实际为 %+v", cfg.Workflows.UserTag)
@@ -65,38 +65,6 @@ obsolete_feature:
 `)
 	if _, err := Load(mainFile); err != nil {
 		t.Fatalf("未知运行期配置块应被忽略: %v", err)
-	}
-}
-
-// TestLoadConfigRejectsDuplicateExternalRuntimeConfig 确保外部配置不会静默覆盖主配置任务。
-func TestLoadConfigRejectsDuplicateExternalRuntimeConfig(t *testing.T) {
-	mainFile := writeRuntimeConfigFiles(t, "", `
-task_periodic:
-  - name: "dup-periodic"
-    cron: "0 2 * * *"
-    workflow: "external.workflow"
-  - name: "dup-periodic"
-    cron: "0 3 * * *"
-    workflow: "external.workflow"
-`)
-	if _, err := Load(mainFile); err == nil {
-		t.Fatal("期望重复周期任务名称返回错误，实际为 nil")
-	}
-}
-
-// TestLoadConfigRejectsDuplicateAnonymousPeriodicConfig 确保匿名周期任务也按调度稳定键校验重复。
-func TestLoadConfigRejectsDuplicateAnonymousPeriodicConfig(t *testing.T) {
-	mainFile := writeRuntimeConfigFiles(t, "", `
-task_periodic:
-  - cron: "0 2 * * *"
-    workflow: "external.workflow"
-    queue: "maintenance"
-  - cron: "0 2 * * *"
-    workflow: "external.workflow"
-    queue: "maintenance"
-`)
-	if _, err := Load(mainFile); err == nil {
-		t.Fatal("期望匿名周期任务稳定键重复返回错误，实际为 nil")
 	}
 }
 

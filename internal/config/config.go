@@ -380,7 +380,7 @@ type HotReloadConfig struct {
 // ConfigFilesConfig 定义可选外部配置文件。
 // 该配置用于拆分运行期大列表配置。
 type ConfigFilesConfig struct {
-	Runtime string `json:"runtime,optional"` // 运行期配置文件
+	Runtime string `json:"runtime,optional"` // 运行期工作流配置文件；不读取周期任务或归档任务
 }
 
 // RuntimeConfigSourceConfig 定义运行期大列表配置来源。

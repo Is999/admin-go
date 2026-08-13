@@ -20,4 +20,4 @@ CREATE TABLE IF NOT EXISTS `runtime_config_release` (
   KEY `idx_published` (`published_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运行配置发布快照';
 
--- 发布快照不写默认种子；DB 模式首次启动时优先发布迁移种下的草稿表，草稿为空再导入当前运行期文件。
+-- 发布快照不写默认种子；DB 模式首次启动只发布初始化 SQL 写入的草稿表，草稿为空时拒绝启动。

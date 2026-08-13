@@ -1,6 +1,6 @@
 module admin
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/Is999/go-utils v1.26.27

@@ -241,8 +241,6 @@ const (
 	ActionRuntimeConfigPublish AdminLogAction = "发布运行配置"
 	// ActionRuntimeConfigRollback 回滚运行配置。
 	ActionRuntimeConfigRollback AdminLogAction = "回滚运行配置"
-	// ActionRuntimeConfigImport 导入运行配置。
-	ActionRuntimeConfigImport AdminLogAction = "导入运行配置"
 	// ActionTaskQueuePause 暂停任务队列。
 	ActionTaskQueuePause AdminLogAction = "暂停任务队列"
 	// ActionTaskQueueResume 恢复任务队列。

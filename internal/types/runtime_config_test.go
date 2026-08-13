@@ -6,6 +6,25 @@ import (
 	tasklimits "admin/internal/task/limits"
 )
 
+// TestRuntimeConfigQueryReqAllowsBoundedLargePages 验证两个草稿列表允许五百条，但不会接受更大的单页请求。
+func TestRuntimeConfigQueryReqAllowsBoundedLargePages(t *testing.T) {
+	periodicReq := &RuntimeTaskPeriodicQueryReq{GetPageReq: GetPageReq{Page: 0, PageSize: runtimeConfigMaxPageSize}}
+	if err := periodicReq.Validate(); err != nil {
+		t.Fatalf("周期任务查询参数校验失败: %v", err)
+	}
+	if periodicReq.Page != defaultPageNumber || periodicReq.PageSize != runtimeConfigMaxPageSize {
+		t.Fatalf("周期任务分页 = %d/%d", periodicReq.Page, periodicReq.PageSize)
+	}
+
+	archiveReq := &RuntimeArchiveJobQueryReq{GetPageReq: GetPageReq{Page: 2, PageSize: runtimeConfigMaxPageSize + 1}}
+	if err := archiveReq.Validate(); err != nil {
+		t.Fatalf("归档任务查询参数校验失败: %v", err)
+	}
+	if archiveReq.Page != 2 || archiveReq.PageSize != runtimeConfigMaxPageSize {
+		t.Fatalf("归档任务分页 = %d/%d", archiveReq.Page, archiveReq.PageSize)
+	}
+}
+
 // TestSaveRuntimeTaskPeriodicReqValidateNormalizesTargets 验证对应场景符合预期。
 func TestSaveRuntimeTaskPeriodicReqValidateNormalizesTargets(t *testing.T) {
 	req := &SaveRuntimeTaskPeriodicReq{

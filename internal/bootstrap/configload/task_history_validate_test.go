@@ -54,6 +54,19 @@ func TestValidateTaskLimitsAcceptsSafeHistoryDefaultsAndEdges(t *testing.T) {
 	}
 }
 
+// TestValidateRuntimeListCounts 校验文件入口与数据库发布入口使用相同的一万条任务总量边界。
+func TestValidateRuntimeListCounts(t *testing.T) {
+	if err := validateTaskLimits(config.TaskQueueConfig{Periodic: make([]config.TaskPeriodicConfig, tasklimits.MaxPeriodicCount+1)}); err == nil {
+		t.Fatal("超过一万条的周期任务文件配置应被拒绝")
+	}
+	if err := validateArchiveLimits(config.ArchiveConfig{Jobs: make([]config.ArchiveJobConfig, tasklimits.MaxArchiveJobCount+1)}); err == nil {
+		t.Fatal("超过一万条的归档任务文件配置应被拒绝")
+	}
+	if err := validateArchiveLimits(config.ArchiveConfig{Jobs: make([]config.ArchiveJobConfig, tasklimits.MaxArchiveJobCount)}); err != nil {
+		t.Fatalf("一万条归档任务文件配置应处于允许边界: %v", err)
+	}
+}
+
 // TestTaskSamplesRespectRuntimeResourceLimits 确保两份交付样例不会被任务生产边界拒绝。
 func TestTaskSamplesRespectRuntimeResourceLimits(t *testing.T) {
 	for _, path := range []string{"../../../etc/config.sample.yaml", "../../../etc/config.dnmp.sample.yaml"} {

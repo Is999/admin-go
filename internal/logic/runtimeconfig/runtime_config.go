@@ -18,6 +18,7 @@ import (
 	securitylogic "admin/internal/logic/security"
 	"admin/internal/model"
 	"admin/internal/svc"
+	tasklimits "admin/internal/task/limits"
 	"admin/internal/types"
 
 	"github.com/Is999/go-utils/errors"
@@ -36,12 +37,31 @@ const (
 	defaultPollIntervalSeconds = 30
 	// minPollIntervalSeconds 表示 DB 模式轮询最小间隔，避免配置错误刷 Redis。
 	minPollIntervalSeconds = 5
+	// runtimeConfigDraftWriteBatchSize 限制草稿覆盖时每批写入二百条，避免一万条快照产生逐行往返或超大单条 SQL。
+	runtimeConfigDraftWriteBatchSize = 200
+	// maxRuntimeConfigSnapshotBytes 把 JSON/YAML 单份快照限制在十五 MiB，低于 MySQL MEDIUMTEXT 上限并限制 Redis 回源大对象。
+	maxRuntimeConfigSnapshotBytes = 15 << 20
+)
+
+var (
+	// errRuntimeConfigCountLimit 标识草稿新增达到业务总量上限，调用层据此返回参数错误而不是数据库故障。
+	errRuntimeConfigCountLimit = errors.New("运行配置草稿数量达到上限")
+	// errRuntimeConfigInitialReleaseExists 表示其它实例已先完成首次发布，当前实例应加载现有 active 版本而不是重复发布。
+	errRuntimeConfigInitialReleaseExists = errors.New("运行配置初始版本已由其它实例发布")
 )
 
 // ReleaseSnapshot 是运行态发布快照，只包含数据库化的大列表配置。
 type ReleaseSnapshot struct {
 	ArchiveJobs  []config.ArchiveJobConfig   `json:"archive_jobs" yaml:"archive_jobs"`   // 归档任务列表
 	TaskPeriodic []config.TaskPeriodicConfig `json:"task_periodic" yaml:"task_periodic"` // 周期任务列表
+}
+
+// preparedRuntimeConfigSnapshot 保存已经完成归一化、校验和序列化的发布内容，事务内只负责原子写入草稿与版本状态。
+type preparedRuntimeConfigSnapshot struct {
+	Snapshot ReleaseSnapshot // 归一化后的周期任务和归档任务快照
+	JSON     string          // 写入发布表和 table-cache 的 JSON 快照
+	YAML     string          // 提供给运维查看的 YAML 快照
+	Checksum string          // 按 JSON 快照计算的 SHA256
 }
 
 // StateCache 是 table-cache 中运行配置 active 版本状态。
@@ -138,9 +158,15 @@ func EncodeSnapshot(snapshot ReleaseSnapshot) (string, string, string, error) {
 	if err != nil {
 		return "", "", "", errors.Tag(err)
 	}
+	if len(jsonBytes) > maxRuntimeConfigSnapshotBytes {
+		return "", "", "", errors.Errorf("运行配置 JSON 快照不能超过 %d 字节", maxRuntimeConfigSnapshotBytes)
+	}
 	yamlBytes, err := yaml.Marshal(snapshot)
 	if err != nil {
 		return "", "", "", errors.Tag(err)
+	}
+	if len(yamlBytes) > maxRuntimeConfigSnapshotBytes {
+		return "", "", "", errors.Errorf("运行配置 YAML 快照不能超过 %d 字节", maxRuntimeConfigSnapshotBytes)
 	}
 	return string(jsonBytes), string(yamlBytes), sha256Hex(jsonBytes), nil
 }
@@ -161,8 +187,7 @@ func LoadActiveSnapshotCached(ctx context.Context, svcCtx *svc.ServiceContext) (
 	return logicObj.loadActiveSnapshotCached()
 }
 
-// EnsureInitialRelease 确保 DB 模式首次启动时已有 active 发布快照。
-// 当 active 为空时优先发布迁移种下的草稿表，草稿为空再回退当前文件种子。
+// EnsureInitialRelease 确保 DB 模式首次启动时已有 active 发布快照；初始内容只允许来自数据库初始化草稿表。
 func EnsureInitialRelease(ctx context.Context, svcCtx *svc.ServiceContext) (*ActiveRelease, error) {
 	logicObj := NewRuntimeConfigLogicWithContext(ctx, svcCtx)
 	state, err := logicObj.loadActiveStateCached()
@@ -172,24 +197,10 @@ func EnsureInitialRelease(ctx context.Context, svcCtx *svc.ServiceContext) (*Act
 	if state.ActiveReleaseID != 0 {
 		return logicObj.loadActiveSnapshotCached()
 	}
-	draftSnapshot, err := logicObj.buildDraftSnapshot()
-	if err != nil {
-		return nil, errors.Wrap(err, "读取运行配置初始草稿失败")
-	}
-	fileSnapshot := CurrentSnapshotFromConfig(logicObj.currentConfig())
-	snapshot, replaceDraft, remark := initialReleaseSnapshot(draftSnapshot, fileSnapshot)
-	if runtimeConfigSnapshotEmpty(snapshot) {
-		return nil, errors.Errorf("运行配置未发布 active release，且当前文件和草稿表没有可迁移的 task_periodic/archive_jobs")
-	}
-	if _, err = ValidateSnapshot(snapshot); err != nil {
-		return nil, errors.Wrap(err, "自动发布运行配置初始版本失败")
-	}
-	if replaceDraft {
-		if err = logicObj.replaceDraft(snapshot); err != nil {
-			return nil, errors.Wrap(err, "写入运行配置初始草稿失败")
+	if _, err = logicObj.publishInitialDraft(); err != nil {
+		if errors.Is(err, errRuntimeConfigInitialReleaseExists) {
+			return logicObj.loadActiveSnapshotCached()
 		}
-	}
-	if _, err = logicObj.publishSnapshot(snapshot, remark, 0); err != nil {
 		if active, loadErr := logicObj.loadActiveSnapshotCached(); loadErr == nil {
 			return active, nil
 		}
@@ -198,30 +209,36 @@ func EnsureInitialRelease(ctx context.Context, svcCtx *svc.ServiceContext) (*Act
 	return logicObj.loadActiveSnapshotCached()
 }
 
-// initialReleaseSnapshot 选择首次发布来源；返回值标记是否需要用文件种子覆盖草稿表。
-func initialReleaseSnapshot(draftSnapshot ReleaseSnapshot, fileSnapshot ReleaseSnapshot) (ReleaseSnapshot, bool, string) {
-	if !runtimeConfigSnapshotEmpty(draftSnapshot) {
-		return draftSnapshot, false, "bootstrap publish runtime config draft"
-	}
-	if !runtimeConfigSnapshotEmpty(fileSnapshot) {
-		return fileSnapshot, true, "bootstrap import current runtime config"
-	}
-	return ReleaseSnapshot{}, false, ""
-}
-
 // LoadActiveStateCached 从 table-cache 读取当前 active 版本状态，不触碰发布快照。
 func LoadActiveStateCached(ctx context.Context, svcCtx *svc.ServiceContext) (StateCache, error) {
 	logicObj := NewRuntimeConfigLogicWithContext(ctx, svcCtx)
 	return logicObj.loadActiveStateCached()
 }
 
-// Overview 查询运行配置来源、active 版本、草稿数量和对比快照。
-func (l *RuntimeConfigLogic) Overview() *types.BizResult {
+// Overview 查询运行配置来源、active 版本和草稿数量；全量快照只在调用方显式请求时读取和序列化。
+func (l *RuntimeConfigLogic) Overview(req *types.RuntimeConfigOverviewReq) *types.BizResult {
 	cfg := l.currentConfig()
-	state, _ := l.loadActiveStateCached()
+	state, err := l.loadActiveStateCached()
+	if err != nil {
+		return types.ServerError(i18n.MsgKeyQueryFail, err, "RuntimeConfigLogic.Overview 读取 active 状态失败").ToBizResult()
+	}
 	periodicCount, archiveCount, err := l.draftCounts()
 	if err != nil {
 		return types.DBError(i18n.MsgKeyQueryFail, err, "RuntimeConfigLogic.Overview 查询草稿数量失败").ToBizResult()
+	}
+	resp := &types.RuntimeConfigOverviewResp{
+		Source:              NormalizeSource(cfg.RuntimeConfig.Source),
+		PollIntervalSeconds: PollIntervalSeconds(cfg),
+		State:               stateCacheToItem(state),
+		Draft: types.RuntimeConfigDraftCount{
+			PeriodicTasks: periodicCount,
+			ArchiveJobs:   archiveCount,
+		},
+		CurrentSnapshot: snapshotToResp(ReleaseSnapshot{}),
+		DraftSnapshot:   snapshotToResp(ReleaseSnapshot{}),
+	}
+	if req == nil || !req.IncludeSnapshots {
+		return types.NewBizResult(codes.FetchSuccess).WithData(resp)
 	}
 	draftSnapshot, err := l.buildDraftSnapshot()
 	if err != nil {
@@ -232,19 +249,11 @@ func (l *RuntimeConfigLogic) Overview() *types.BizResult {
 		return types.ServerError(i18n.MsgKeyInternalError, err, "RuntimeConfigLogic.Overview 生成草稿快照失败").ToBizResult()
 	}
 	activeChecksum := strings.TrimSpace(state.ActiveChecksum)
-	return types.NewBizResult(codes.FetchSuccess).WithData(&types.RuntimeConfigOverviewResp{
-		Source:              NormalizeSource(cfg.RuntimeConfig.Source),
-		PollIntervalSeconds: PollIntervalSeconds(cfg),
-		State:               stateCacheToItem(state),
-		Draft: types.RuntimeConfigDraftCount{
-			PeriodicTasks: periodicCount,
-			ArchiveJobs:   archiveCount,
-		},
-		CurrentSnapshot: snapshotToResp(CurrentSnapshotFromConfig(cfg)),
-		DraftSnapshot:   snapshotToResp(draftSnapshot),
-		DraftChecksum:   draftChecksum,
-		DraftChanged:    draftChecksum != activeChecksum,
-	})
+	resp.CurrentSnapshot = snapshotToResp(CurrentSnapshotFromConfig(cfg))
+	resp.DraftSnapshot = snapshotToResp(draftSnapshot)
+	resp.DraftChecksum = draftChecksum
+	resp.DraftChanged = draftChecksum != activeChecksum
+	return types.NewBizResult(codes.FetchSuccess).WithData(resp)
 }
 
 // ListPeriodicTasks 分页查询周期任务草稿。
@@ -299,6 +308,9 @@ func (l *RuntimeConfigLogic) SavePeriodicTask(req *types.SaveRuntimeTaskPeriodic
 	adminID := l.adminID()
 	row := periodicReqToModel(req, adminID)
 	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := l.lockRuntimeConfigDraftTx(tx); err != nil {
+			return errors.Tag(err)
+		}
 		if req.ID > 0 {
 			row.ID = req.ID
 			result := tx.Model(&model.RuntimeTaskPeriodic{}).
@@ -306,9 +318,15 @@ func (l *RuntimeConfigLogic) SavePeriodicTask(req *types.SaveRuntimeTaskPeriodic
 				Updates(periodicModelUpdateMap(row))
 			return checkRuntimeConfigUpdated(result, req.ID, "周期任务草稿")
 		}
+		if err := l.ensureDraftCapacityTx(tx, &model.RuntimeTaskPeriodic{}, tasklimits.MaxPeriodicCount, "周期任务"); err != nil {
+			return errors.Tag(err)
+		}
 		return errors.Tag(tx.Create(&row).Error)
 	})
 	if err != nil {
+		if errors.Is(err, errRuntimeConfigCountLimit) {
+			return types.ParamError(err).ToBizResult()
+		}
 		return types.DBError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.SavePeriodicTask 保存失败").ToBizResult()
 	}
 	return types.NewBizResult(codes.SaveSuccess).SetI18nMessage(i18n.MsgKeySaveSuccess)
@@ -377,6 +395,9 @@ func (l *RuntimeConfigLogic) SaveArchiveJob(req *types.SaveRuntimeArchiveJobReq)
 	adminID := l.adminID()
 	row := archiveReqToModel(req, adminID)
 	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := l.lockRuntimeConfigDraftTx(tx); err != nil {
+			return errors.Tag(err)
+		}
 		if req.ID > 0 {
 			row.ID = req.ID
 			result := tx.Model(&model.RuntimeArchiveJob{}).
@@ -384,9 +405,15 @@ func (l *RuntimeConfigLogic) SaveArchiveJob(req *types.SaveRuntimeArchiveJobReq)
 				Updates(archiveModelUpdateMap(row))
 			return checkRuntimeConfigUpdated(result, req.ID, "归档任务草稿")
 		}
+		if err := l.ensureDraftCapacityTx(tx, &model.RuntimeArchiveJob{}, tasklimits.MaxArchiveJobCount, "归档任务"); err != nil {
+			return errors.Tag(err)
+		}
 		return errors.Tag(tx.Create(&row).Error)
 	})
 	if err != nil {
+		if errors.Is(err, errRuntimeConfigCountLimit) {
+			return types.ParamError(err).ToBizResult()
+		}
 		return types.DBError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.SaveArchiveJob 保存失败").ToBizResult()
 	}
 	return types.NewBizResult(codes.SaveSuccess).SetI18nMessage(i18n.MsgKeySaveSuccess)
@@ -449,39 +476,13 @@ func (l *RuntimeConfigLogic) Rollback(req *types.RuntimeConfigRollbackReq) *type
 	if err != nil {
 		return types.ServerError(i18n.MsgKeyQueryFail, err, "RuntimeConfigLogic.Rollback 查询发布快照失败").ToBizResult()
 	}
-	if err = l.replaceDraft(snapshot); err != nil {
-		return types.DBError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.Rollback 写回草稿失败").ToBizResult()
-	}
 	remark := req.Remark
 	if remark == "" {
 		remark = fmt.Sprintf("rollback to release %d", req.ReleaseID)
 	}
-	resp, err := l.publishSnapshot(snapshot, remark, release.ID)
+	resp, err := l.publishRollbackSnapshot(snapshot, remark, release.ID)
 	if err != nil {
-		return types.ServerError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.Rollback 发布回滚版本失败").ToBizResult()
-	}
-	return types.NewBizResult(codes.SaveSuccess).SetI18nMessage(i18n.MsgKeySaveSuccess).WithData(resp)
-}
-
-// ImportCurrent 导入当前运行态配置并发布首个或新版本。
-func (l *RuntimeConfigLogic) ImportCurrent(req *types.RuntimeConfigImportReq) *types.BizResult {
-	if err := req.Validate(); err != nil {
-		return types.ParamError(err).ToBizResult()
-	}
-	if err := l.requireMFA(req.TwoStepKey, req.TwoStepValue); err != nil {
-		return (&adminlogic.AdminLogic{BaseLogic: l.BaseLogic}).MFABizResult(err)
-	}
-	snapshot := CurrentSnapshotFromConfig(l.currentConfig())
-	if err := l.replaceDraft(snapshot); err != nil {
-		return types.DBError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.ImportCurrent 写入草稿失败").ToBizResult()
-	}
-	remark := req.Remark
-	if remark == "" {
-		remark = "import current runtime config"
-	}
-	resp, err := l.publishSnapshot(snapshot, remark, 0)
-	if err != nil {
-		return types.ServerError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.ImportCurrent 发布导入版本失败").ToBizResult()
+		return types.ServerError(i18n.MsgKeySaveFail, err, "RuntimeConfigLogic.Rollback 写回草稿并发布回滚版本失败").ToBizResult()
 	}
 	return types.NewBizResult(codes.SaveSuccess).SetI18nMessage(i18n.MsgKeySaveSuccess).WithData(resp)
 }
@@ -531,30 +532,87 @@ func (l *RuntimeConfigLogic) GetRelease(req *types.RuntimeConfigReleaseIDReq) *t
 	})
 }
 
-// publishDraft 从草稿表构造快照并发布为 active 版本。
+// publishDraft 在状态行锁保护下读取草稿并发布，确保并发保存不能插入“读取草稿”和“更新 active 版本”之间。
 func (l *RuntimeConfigLogic) publishDraft(remark string, baseReleaseID uint64) (*types.RuntimeConfigPublishResp, error) {
-	snapshot, err := l.buildDraftSnapshot()
+	return l.publishPreparedSnapshot(func(tx *gorm.DB) (preparedRuntimeConfigSnapshot, error) {
+		snapshot, err := l.buildDraftSnapshotDB(tx)
+		if err != nil {
+			return preparedRuntimeConfigSnapshot{}, errors.Tag(err)
+		}
+		return l.prepareSnapshot(snapshot)
+	}, nil, remark, baseReleaseID)
+}
+
+// publishInitialDraft 只在状态行锁内确认 active 仍为空后发布初始化草稿，避免多实例首次启动产生重复版本。
+func (l *RuntimeConfigLogic) publishInitialDraft() (*types.RuntimeConfigPublishResp, error) {
+	return l.publishPreparedSnapshot(func(tx *gorm.DB) (preparedRuntimeConfigSnapshot, error) {
+		state, err := l.loadStateForUpdate(tx)
+		if err != nil {
+			return preparedRuntimeConfigSnapshot{}, errors.Tag(err)
+		}
+		if state.ActiveReleaseID != 0 {
+			return preparedRuntimeConfigSnapshot{}, errRuntimeConfigInitialReleaseExists
+		}
+		snapshot, err := l.buildDraftSnapshotDB(tx)
+		if err != nil {
+			return preparedRuntimeConfigSnapshot{}, errors.Wrap(err, "读取运行配置初始草稿失败")
+		}
+		if runtimeConfigSnapshotEmpty(snapshot) {
+			return preparedRuntimeConfigSnapshot{}, errors.Errorf("运行配置未发布 active release，且数据库初始化草稿表没有 task_periodic/archive_jobs")
+		}
+		return l.prepareSnapshot(snapshot)
+	}, nil, "bootstrap publish runtime config draft", 0)
+}
+
+// publishRollbackSnapshot 在同一状态行锁和事务内覆盖草稿、写入回滚版本并切换 active，避免并发编辑拆开两个副作用。
+func (l *RuntimeConfigLogic) publishRollbackSnapshot(snapshot ReleaseSnapshot, remark string, baseReleaseID uint64) (*types.RuntimeConfigPublishResp, error) {
+	prepared, err := l.prepareSnapshot(snapshot)
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
-	return l.publishSnapshot(snapshot, remark, baseReleaseID)
+	return l.publishPreparedSnapshot(func(*gorm.DB) (preparedRuntimeConfigSnapshot, error) {
+		return prepared, nil
+	}, func(tx *gorm.DB, normalized ReleaseSnapshot) error {
+		return l.replaceDraftTx(tx, normalized)
+	}, remark, baseReleaseID)
 }
 
-// publishSnapshot 校验并持久化发布快照，同时触发运行态热加载。
+// publishSnapshot 校验指定快照并持久化为 active 版本，供启动期初始化等不读取可编辑草稿的路径使用。
 func (l *RuntimeConfigLogic) publishSnapshot(snapshot ReleaseSnapshot, remark string, baseReleaseID uint64) (*types.RuntimeConfigPublishResp, error) {
-	snapshot = normalizeReleaseSnapshot(snapshot)
-	if _, err := l.validateSnapshot(snapshot); err != nil {
+	prepared, err := l.prepareSnapshot(snapshot)
+	if err != nil {
 		return nil, errors.Tag(err)
 	}
+	return l.publishPreparedSnapshot(func(*gorm.DB) (preparedRuntimeConfigSnapshot, error) {
+		return prepared, nil
+	}, nil, remark, baseReleaseID)
+}
+
+// prepareSnapshot 在数据库写事务前完成静态快照校验；草稿发布会在持有状态行锁后调用，保证读取内容与发布版本一致。
+func (l *RuntimeConfigLogic) prepareSnapshot(snapshot ReleaseSnapshot) (preparedRuntimeConfigSnapshot, error) {
+	snapshot = normalizeReleaseSnapshot(snapshot)
+	if _, err := l.validateSnapshot(snapshot); err != nil {
+		return preparedRuntimeConfigSnapshot{}, errors.Tag(err)
+	}
+	_, jsonText, yamlText, checksum, err := encodeReleaseSnapshot(snapshot)
+	if err != nil {
+		return preparedRuntimeConfigSnapshot{}, errors.Tag(err)
+	}
+	return preparedRuntimeConfigSnapshot{Snapshot: snapshot, JSON: jsonText, YAML: yamlText, Checksum: checksum}, nil
+}
+
+// publishPreparedSnapshot 在单个事务内锁定版本状态、取得待发布内容、执行可选草稿覆盖并切换 active 版本。
+func (l *RuntimeConfigLogic) publishPreparedSnapshot(
+	source func(*gorm.DB) (preparedRuntimeConfigSnapshot, error),
+	applyDraft func(*gorm.DB, ReleaseSnapshot) error,
+	remark string,
+	baseReleaseID uint64,
+) (*types.RuntimeConfigPublishResp, error) {
 	db, err := l.writeDB()
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
 	admin := l.GetCtxAdmin()
-	_, jsonText, yamlText, checksum, err := encodeReleaseSnapshot(snapshot)
-	if err != nil {
-		return nil, errors.Tag(err)
-	}
 	publishedByName := admin.Name
 	if strings.TrimSpace(publishedByName) == "" {
 		publishedByName = "system"
@@ -566,13 +624,22 @@ func (l *RuntimeConfigLogic) publishSnapshot(snapshot ReleaseSnapshot, remark st
 		if lockErr != nil {
 			return errors.Tag(lockErr)
 		}
+		prepared, prepareErr := source(tx)
+		if prepareErr != nil {
+			return errors.Tag(prepareErr)
+		}
+		if applyDraft != nil {
+			if applyErr := applyDraft(tx, prepared.Snapshot); applyErr != nil {
+				return errors.Tag(applyErr)
+			}
+		}
 		version := state.ActiveVersion + 1
 		now := time.Now()
 		release = model.RuntimeConfigRelease{
 			VersionNo:          version,
-			SnapshotJSON:       jsonText,
-			SnapshotYAML:       yamlText,
-			Checksum:           checksum,
+			SnapshotJSON:       prepared.JSON,
+			SnapshotYAML:       prepared.YAML,
+			Checksum:           prepared.Checksum,
 			BaseReleaseID:      baseReleaseID,
 			Remark:             strings.TrimSpace(remark),
 			PublishedByAdminID: admin.ID,
@@ -585,7 +652,7 @@ func (l *RuntimeConfigLogic) publishSnapshot(snapshot ReleaseSnapshot, remark st
 		previousReleaseID = state.ActiveReleaseID
 		state.ActiveReleaseID = release.ID
 		state.ActiveVersion = version
-		state.ActiveChecksum = checksum
+		state.ActiveChecksum = prepared.Checksum
 		state.PublishedAt = now
 		if state.ID == 0 {
 			if err = tx.Create(&state).Error; err != nil {
@@ -663,16 +730,27 @@ func (l *RuntimeConfigLogic) buildDraftSnapshot() (ReleaseSnapshot, error) {
 	if err != nil {
 		return ReleaseSnapshot{}, errors.Tag(err)
 	}
+	return l.buildDraftSnapshotDB(db)
+}
+
+// buildDraftSnapshotDB 使用调用方提供的数据库句柄读取完整草稿；发布路径传入已持有状态行锁的事务句柄。
+func (l *RuntimeConfigLogic) buildDraftSnapshotDB(db *gorm.DB) (ReleaseSnapshot, error) {
 	var periodicRows []model.RuntimeTaskPeriodic
 	// writeDB 带路由 clause，跨模型查询必须新开 Session，避免沿用上一个 Statement。
-	if err = db.Session(&gorm.Session{NewDB: true}).
-		Order("sort_order ASC").Order("id ASC").Find(&periodicRows).Error; err != nil {
+	if err := db.Session(&gorm.Session{NewDB: true}).
+		Order("sort_order ASC").Order("id ASC").Limit(tasklimits.MaxPeriodicCount + 1).Find(&periodicRows).Error; err != nil {
 		return ReleaseSnapshot{}, errors.Tag(err)
 	}
+	if len(periodicRows) > tasklimits.MaxPeriodicCount {
+		return ReleaseSnapshot{}, errors.Errorf("周期任务草稿不能超过 %d 条", tasklimits.MaxPeriodicCount)
+	}
 	var archiveRows []model.RuntimeArchiveJob
-	if err = db.Session(&gorm.Session{NewDB: true}).
-		Order("sort_order ASC").Order("id ASC").Find(&archiveRows).Error; err != nil {
+	if err := db.Session(&gorm.Session{NewDB: true}).
+		Order("sort_order ASC").Order("id ASC").Limit(tasklimits.MaxArchiveJobCount + 1).Find(&archiveRows).Error; err != nil {
 		return ReleaseSnapshot{}, errors.Tag(err)
+	}
+	if len(archiveRows) > tasklimits.MaxArchiveJobCount {
+		return ReleaseSnapshot{}, errors.Errorf("归档任务草稿不能超过 %d 条", tasklimits.MaxArchiveJobCount)
 	}
 	snapshot := ReleaseSnapshot{
 		ArchiveJobs:  make([]config.ArchiveJobConfig, 0, len(archiveRows)),
@@ -687,35 +765,35 @@ func (l *RuntimeConfigLogic) buildDraftSnapshot() (ReleaseSnapshot, error) {
 	return snapshot, nil
 }
 
-// replaceDraft 用快照内容覆盖当前草稿表。
-func (l *RuntimeConfigLogic) replaceDraft(snapshot ReleaseSnapshot) error {
-	db, err := l.writeDB()
-	if err != nil {
+// replaceDraftTx 在调用方持有状态行锁的事务内覆盖草稿；输入已经过发布快照归一化和校验。
+func (l *RuntimeConfigLogic) replaceDraftTx(tx *gorm.DB, snapshot ReleaseSnapshot) error {
+	adminID := l.adminID()
+	periodicRows := make([]model.RuntimeTaskPeriodic, 0, len(snapshot.TaskPeriodic))
+	for index, item := range snapshot.TaskPeriodic {
+		periodicRows = append(periodicRows, periodicConfigToModel(item, adminID, index))
+	}
+	archiveRows := make([]model.RuntimeArchiveJob, 0, len(snapshot.ArchiveJobs))
+	for index, item := range snapshot.ArchiveJobs {
+		archiveRows = append(archiveRows, archiveConfigToModel(item, adminID, index))
+	}
+	// 覆盖单库草稿表；同一事务内跨模型操作也要清理 Statement，事务连接仍由 tx 保持。
+	if err := tx.Session(&gorm.Session{NewDB: true, AllowGlobalUpdate: true}).Delete(&model.RuntimeTaskPeriodic{}).Error; err != nil {
 		return errors.Tag(err)
 	}
-	adminID := l.adminID()
-	return db.Transaction(func(tx *gorm.DB) error {
-		// 覆盖单库草稿表；同一事务内跨模型操作也要清理 Statement，事务连接仍由 tx 保持。
-		if err := tx.Session(&gorm.Session{NewDB: true, AllowGlobalUpdate: true}).Delete(&model.RuntimeTaskPeriodic{}).Error; err != nil {
-			return errors.Tag(err)
+	if err := tx.Session(&gorm.Session{NewDB: true, AllowGlobalUpdate: true}).Delete(&model.RuntimeArchiveJob{}).Error; err != nil {
+		return errors.Tag(err)
+	}
+	if len(periodicRows) > 0 {
+		if err := tx.Session(&gorm.Session{NewDB: true}).CreateInBatches(&periodicRows, runtimeConfigDraftWriteBatchSize).Error; err != nil {
+			return errors.Wrap(err, "批量写入周期任务草稿失败")
 		}
-		if err := tx.Session(&gorm.Session{NewDB: true, AllowGlobalUpdate: true}).Delete(&model.RuntimeArchiveJob{}).Error; err != nil {
-			return errors.Tag(err)
+	}
+	if len(archiveRows) > 0 {
+		if err := tx.Session(&gorm.Session{NewDB: true}).CreateInBatches(&archiveRows, runtimeConfigDraftWriteBatchSize).Error; err != nil {
+			return errors.Wrap(err, "批量写入归档任务草稿失败")
 		}
-		for index, item := range snapshot.TaskPeriodic {
-			row := periodicConfigToModel(item, adminID, index)
-			if err := tx.Session(&gorm.Session{NewDB: true}).Create(&row).Error; err != nil {
-				return errors.Tag(err)
-			}
-		}
-		for index, item := range snapshot.ArchiveJobs {
-			row := archiveConfigToModel(item, adminID, index)
-			if err := tx.Session(&gorm.Session{NewDB: true}).Create(&row).Error; err != nil {
-				return errors.Tag(err)
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // loadActiveSnapshotCached 从缓存回源读取当前 active 发布快照。
@@ -784,6 +862,30 @@ func (l *RuntimeConfigLogic) loadStateForUpdate(tx *gorm.DB) (model.RuntimeConfi
 	return model.RuntimeConfigState{}, errors.Tag(err)
 }
 
+// lockRuntimeConfigDraftTx 锁定运行配置状态行；保存、删除和全量覆盖共用该顺序，避免并发写入互相覆盖。
+func (l *RuntimeConfigLogic) lockRuntimeConfigDraftTx(tx *gorm.DB) error {
+	state, err := l.loadStateForUpdate(tx)
+	if err != nil {
+		return errors.Wrap(err, "锁定运行配置草稿失败")
+	}
+	if state.ID == 0 {
+		return errors.Errorf("运行配置状态未初始化")
+	}
+	return nil
+}
+
+// ensureDraftCapacityTx 在调用方持有运行配置状态行锁后统计目标草稿表，保证并发新增不会共同越过数量上限。
+func (l *RuntimeConfigLogic) ensureDraftCapacityTx(tx *gorm.DB, modelPtr any, maxCount int, subject string) error {
+	var count int64
+	if err := tx.Session(&gorm.Session{NewDB: true}).Model(modelPtr).Count(&count).Error; err != nil {
+		return errors.Wrapf(err, "统计%s草稿数量失败", subject)
+	}
+	if count >= int64(maxCount) {
+		return errors.Wrapf(errRuntimeConfigCountLimit, "%s不能超过 %d 条", subject, maxCount)
+	}
+	return nil
+}
+
 // loadReleaseByID 按发布 ID 读取发布记录和快照。
 func (l *RuntimeConfigLogic) loadReleaseByID(releaseID uint64) (model.RuntimeConfigRelease, ReleaseSnapshot, error) {
 	db, err := l.writeDB()
@@ -807,14 +909,19 @@ func (l *RuntimeConfigLogic) deleteByID(modelPtr any, id uint64) error {
 	if err != nil {
 		return errors.Tag(err)
 	}
-	result := db.Where("id = ?", id).Delete(modelPtr)
-	if result.Error != nil {
-		return errors.Tag(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return errors.Errorf("记录不存在: %d", id)
-	}
-	return nil
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := l.lockRuntimeConfigDraftTx(tx); err != nil {
+			return errors.Tag(err)
+		}
+		result := tx.Where("id = ?", id).Delete(modelPtr)
+		if result.Error != nil {
+			return errors.Tag(result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return errors.Errorf("记录不存在: %d", id)
+		}
+		return nil
+	})
 }
 
 // checkRuntimeConfigUpdated 区分数据库错误和按 ID 更新不到草稿的假成功。

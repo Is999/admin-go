@@ -78,7 +78,7 @@ const (
 	MFAScenarioUserTagLeaseRelease = 10
 	// MFAScenarioSecretKeyManage 表示秘钥管理敏感操作场景。
 	MFAScenarioSecretKeyManage = 11
-	// MFAScenarioRuntimeConfigManage 表示运行配置发布、回滚和导入场景。
+	// MFAScenarioRuntimeConfigManage 表示运行配置发布和回滚场景。
 	MFAScenarioRuntimeConfigManage = 12
 	// MFAScenarioUserManage 表示前台用户管理敏感操作场景。
 	MFAScenarioUserManage = 13

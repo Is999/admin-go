@@ -1,24 +1,15 @@
 package runtimefile
 
-import (
-	"admin/internal/config"
+import "admin/internal/config"
 
-	"github.com/Is999/go-utils/errors"
-)
-
-// 运行期外部配置支持的顶层配置段。
+// 运行期外部配置支持的顶层配置段；周期任务和归档任务只从数据库发布快照读取。
 const (
-	sectionTaskPeriodic = "task_periodic" // 周期任务列表
-	sectionArchiveJobs  = "archive_jobs"  // 归档任务列表
-	sectionWorkflows    = "workflows"     // 工作流类配置聚合入口
+	sectionWorkflows = "workflows" // 工作流类配置聚合入口
 )
 
-// file 描述外部运行期大配置文件。
-// 推荐在 K8s 中把该文件作为独立 ConfigMap key 挂载，主配置只保留 config_files.runtime 路径。
+// file 描述外部运行期工作流配置文件；周期任务和归档任务字段即使出现也不会被当前进程读取。
 type file struct {
-	TaskPeriodic []config.TaskPeriodicConfig `json:"task_periodic,optional"` // 周期任务列表
-	ArchiveJobs  []config.ArchiveJobConfig   `json:"archive_jobs,optional"`  // 归档任务列表
-	Workflows    config.WorkflowsConfig      `json:"workflows,optional"`     // 工作流类配置聚合入口
+	Workflows config.WorkflowsConfig `json:"workflows,optional"` // 工作流类配置聚合入口
 }
 
 // sectionSpec 描述一个允许运行期外置的配置段。
@@ -30,14 +21,6 @@ type sectionSpec struct {
 // sectionSpecs 返回运行期外部配置段规格。
 func sectionSpecs() []sectionSpec {
 	return []sectionSpec{
-		{
-			Key:   sectionTaskPeriodic,
-			apply: applyTaskPeriodic,
-		},
-		{
-			Key:   sectionArchiveJobs,
-			apply: applyArchiveJobs,
-		},
 		{
 			Key:   sectionWorkflows,
 			apply: applyWorkflows,
@@ -53,26 +36,6 @@ func sectionKeys() map[string]struct{} {
 		keys[spec.Key] = struct{}{}
 	}
 	return keys
-}
-
-// applyTaskPeriodic 合并外部周期任务配置。
-func applyTaskPeriodic(cfg *config.Config, ext file, source string) error {
-	merged, err := mergeTaskPeriodic(cfg.Task.Periodic, ext.TaskPeriodic, source)
-	if err != nil {
-		return errors.Tag(err)
-	}
-	cfg.Task.Periodic = merged
-	return nil
-}
-
-// applyArchiveJobs 合并外部归档任务配置。
-func applyArchiveJobs(cfg *config.Config, ext file, source string) error {
-	merged, err := mergeArchiveJobs(cfg.Archive.Jobs, ext.ArchiveJobs, source)
-	if err != nil {
-		return errors.Tag(err)
-	}
-	cfg.Archive.Jobs = merged
-	return nil
 }
 
 // applyWorkflows 覆盖外部 workflows 配置块。

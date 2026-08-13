@@ -19,8 +19,10 @@ const (
 	MaxUniqueTTLSeconds = 30 * 24 * 60 * 60
 	// MaxScheduleDelaySeconds 限制一次性任务最长提前三十天进入 Redis scheduled 状态。
 	MaxScheduleDelaySeconds = 30 * 24 * 60 * 60
-	// MaxPeriodicCount 限制单应用周期任务数量，避免发布大快照拖慢调度同步并放大 Redis 元数据。
-	MaxPeriodicCount = 1000
+	// MaxPeriodicCount 限制单应用周期任务草稿和发布快照为一万条，超过后拒绝新增、全量覆盖、回滚和发布，不做静默截断。
+	MaxPeriodicCount = 10000
+	// MaxArchiveJobCount 限制单应用归档任务草稿和发布快照为一万条，超过后拒绝新增、全量覆盖、回滚和发布，不做静默截断。
+	MaxArchiveJobCount = 10000
 	// MaxPayloadBytes 限制单个通用任务负载为一 MiB，大数据必须改传对象引用或游标。
 	MaxPayloadBytes = 1 << 20
 	// MaxWorkflowTargets 限制单次工作流目标数量，避免请求解析和任务扇出被异常列表放大。

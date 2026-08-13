@@ -173,7 +173,6 @@ func TestPermissionSQLContainsRequiredCurrentModules(t *testing.T) {
 		"runtime.config.validate",
 		"runtime.config.publish",
 		"runtime.config.rollback",
-		"runtime.config.import",
 		"security.debug.index",
 	}
 	requiredModules = append(requiredModules, string(routealias.DocsIndex), string(routealias.DocsAPIServiceIndex))

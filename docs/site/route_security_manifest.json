@@ -1935,17 +1935,6 @@
       "responseCipher": []
     },
     {
-      "alias": "runtime.config.import",
-      "method": "POST",
-      "path": "/api/runtime-config/import-current",
-      "access": "auth",
-      "describe": "导入运行配置",
-      "requestSign": null,
-      "requestCipher": [],
-      "responseSign": null,
-      "responseCipher": []
-    },
-    {
       "alias": "collector.overview",
       "method": "GET",
       "path": "/api/collector/overview",

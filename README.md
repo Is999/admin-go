@@ -36,7 +36,7 @@ Admin 负责后台控制面和异步执行面：
 
 ## 技术栈
 
-- Go `1.26.5`、go-zero HTTP 框架。
+- Go `1.26.6`、go-zero HTTP 框架。
 - GORM + MySQL，支持主从读写路由和命名扩展库。
 - Redis + redsync，用于缓存、分布式锁和运行态状态。
 - Asynq + robfig/cron，用于 Worker、Scheduler 和工作流。
@@ -154,7 +154,7 @@ make update-route-security-manifest
 
 ### 1. 准备依赖
 
-必需依赖为 Go `1.26.5`、MySQL 和 Redis；Kafka、对象存储、OTLP 等依赖按启用能力准备。
+必需依赖为 Go `1.26.6`、MySQL 和 Redis；Kafka、对象存储、OTLP 等依赖按启用能力准备。
 
 ```bash
 cp etc/config.dnmp.sample.yaml etc/config.yaml
@@ -192,12 +192,12 @@ go run ./cmd/migrate -version
 - `etc/config.sample.yaml`：标准配置样例。
 - `etc/config.dnmp.sample.yaml`：本地 dnmp 环境样例。
 - `etc/config.yaml`：本地实际配置，不应提交生产密钥。
-- `etc/config.d/runtime.sample.yaml`：运行期大列表配置样例。
-- `etc/config.d/runtime.yaml`：本地运行期配置。
+- `etc/config.d/runtime.sample.yaml`：运行期工作流配置样例，不包含周期任务或归档任务。
+- `etc/config.d/runtime.yaml`：本地运行期工作流配置。
 
 项目自有 YAML 样例中的每个固定配置字段必须保留紧邻字段上方、与字段同缩进的中文注释。注释至少写明消费组件和用途，并如实补充源码已定义的取值/单位、缺省与空值、热加载或重启、敏感信息及跨字段约束；父节点概述不能替代子字段说明。动态 map 的重复数据项由父字段统一定义 key/value、空值和合并语义，第三方 schema 与纯数据文件按 [AI 开发规范](docs/site/角色文档/后端开发/AI开发规范.md#yaml-配置字段行级注释)记录排除依据。
 
-当 `runtime_config.source=database` 时，`task_periodic` 和 `archive_jobs` 由运行配置 active release 管理，运行期文件中的同名配置只用于首次导入；`workflows` 仍从运行期文件加载并参与热更新。
+当 `runtime_config.source=database` 时，`task_periodic` 和 `archive_jobs` 只由数据库草稿与 active release 管理；首次启动只发布初始化 SQL 写入的草稿，运行期文件仅加载 `workflows` 并参与热更新。
 
 运行期参数可由已有应用器热加载；HTTP 监听、MySQL、Redis、Kafka、OTLP、路由、任务插件和 workflow 定义等启动期能力变更后必须重启。字段说明见[配置字段说明](docs/site/角色文档/后端开发/配置字段说明.md)。
 

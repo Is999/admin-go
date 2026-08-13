@@ -114,13 +114,5 @@ func RouteSpecs() []shared.RouteSpec {
 			Description: shared.RuntimeConfigRollback.Describe,
 			Handler:     RollbackHandler,
 		},
-		{
-			Method:      http.MethodPost,
-			Path:        "/api/runtime-config/import-current", // 导入当前运行配置并发布。
-			Access:      shared.RouteAccessAuth,
-			Meta:        shared.RuntimeConfigImport,
-			Description: shared.RuntimeConfigImport.Describe,
-			Handler:     ImportCurrentHandler,
-		},
 	}
 }

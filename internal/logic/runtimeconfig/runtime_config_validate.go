@@ -83,6 +83,9 @@ func validatePeriodicConfigs(items []config.TaskPeriodicConfig) error {
 
 // validateArchiveJobConfigs 校验归档任务快照，避免发布重复任务或负数运行参数。
 func validateArchiveJobConfigs(items []config.ArchiveJobConfig) error {
+	if len(items) > tasklimits.MaxArchiveJobCount {
+		return errors.Errorf("归档任务不能超过 %d 条", tasklimits.MaxArchiveJobCount)
+	}
 	names := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		name := strings.TrimSpace(item.Name)

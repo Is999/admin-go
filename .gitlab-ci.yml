@@ -14,7 +14,7 @@ cache:
     - .cache/go-build
 
 test:
-  image: golang:1.26.5
+  image: golang:1.26.6
   stage: test
   script:
     - 'git fetch --no-tags origin "$CI_DEFAULT_BRANCH:refs/remotes/origin/$CI_DEFAULT_BRANCH"'
@@ -29,7 +29,7 @@ prometheus-rules:
     - promtool check rules docs/prometheus/*.yml
 
 build:
-  image: golang:1.26.5
+  image: golang:1.26.6
   stage: build
   script:
     - make build build-tools package VERSION="$CI_COMMIT_SHORT_SHA"

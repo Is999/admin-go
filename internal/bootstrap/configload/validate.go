@@ -72,6 +72,9 @@ func Validate(c config.Config) error {
 	if err := validateTaskLimits(c.Task); err != nil {
 		return errors.Tag(err)
 	}
+	if err := validateArchiveLimits(c.Archive); err != nil {
+		return errors.Tag(err)
+	}
 	if err := validators.ValidateCollector(c); err != nil {
 		return errors.Tag(err)
 	}
@@ -83,6 +86,14 @@ func Validate(c config.Config) error {
 	}
 	if err := validators.ValidateProduction(c); err != nil {
 		return errors.Tag(err)
+	}
+	return nil
+}
+
+// validateArchiveLimits 校验进程内归档任务总量；数据库 active 快照加载后也必须遵守与草稿相同的一万条上限。
+func validateArchiveLimits(cfg config.ArchiveConfig) error {
+	if len(cfg.Jobs) > tasklimits.MaxArchiveJobCount {
+		return errors.Errorf("archive.jobs 不能超过 %d 条", tasklimits.MaxArchiveJobCount)
 	}
 	return nil
 }

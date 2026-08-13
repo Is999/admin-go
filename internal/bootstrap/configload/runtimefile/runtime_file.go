@@ -9,8 +9,7 @@ import (
 	"github.com/zeromicro/go-zero/core/conf"
 )
 
-// Apply 按主配置 config_files 声明合并外部大配置文件。
-// 周期任务和归档任务会合并并校验唯一，workflows 显式存在时整体覆盖。
+// Apply 按主配置 config_files 声明合并外部工作流配置；周期任务和归档任务只由数据库发布快照管理。
 func Apply(mainFile string, cfg *config.Config) error {
 	if cfg == nil {
 		return nil
@@ -25,7 +24,7 @@ func Apply(mainFile string, cfg *config.Config) error {
 	return nil
 }
 
-// apply 合并推荐的单个运行期大配置文件。
+// apply 合并单个运行期工作流配置文件。
 func apply(path string, cfg *config.Config) error {
 	content, keys, err := knownContent(path)
 	if err != nil {

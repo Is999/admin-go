@@ -389,37 +389,71 @@ func TestDocumentPermissionsStaySeparated(t *testing.T) {
 	}
 }
 
-// TestAdminPermissionSeedIDsContiguous 确保未上线权限基线从 1 连续编号且父节点先于子节点。
-func TestAdminPermissionSeedIDsContiguous(t *testing.T) {
+// TestAdminPermissionSeedHierarchy 确保权限主键单调且不复用已下线 ID，并验证每条父级链都引用已声明节点。
+func TestAdminPermissionSeedHierarchy(t *testing.T) {
 	sql := migrationSQLByAsset(t, "admin_permission.sql")
-	rowRe := regexp.MustCompile(`(?m)VALUES \((\d+), '[^']*', '[^']*', '[^']*', (\d+), '([^']*)'`)
+	rowRe := regexp.MustCompile(`(?m)VALUES \((\d+), '([^']*)', '[^']*', '[^']*', (\d+), '([^']*)'`)
 	rows := rowRe.FindAllStringSubmatch(sql, -1)
 	if len(rows) == 0 {
 		t.Fatal("admin_permission.sql 未找到权限种子")
 	}
-	for index, row := range rows {
+	// retiredIDs 是已经从初始化资产删除但存量库可能使用过的内部主键，禁止重新分配给其他权限。
+	retiredIDs := map[int]string{126: "runtime.config.import"}
+	seenIDs := make(map[int]struct{}, len(rows))
+	seenUUIDs := make(map[string]struct{}, len(rows))
+	ancestorChains := make(map[int]string, len(rows))
+	previousID := 0
+	for _, row := range rows {
 		id, err := strconv.Atoi(row[1])
 		if err != nil {
 			t.Fatalf("解析权限 id 失败: %v", err)
 		}
-		wantID := index + 1
-		if id != wantID {
-			t.Fatalf("权限种子 id=%d，期望从 1 连续编号到 %d", id, len(rows))
+		if id <= previousID {
+			t.Fatalf("权限种子必须按 id 严格递增: previous=%d current=%d", previousID, id)
 		}
-		pid, err := strconv.Atoi(row[2])
+		if retiredModule, retired := retiredIDs[id]; retired {
+			t.Fatalf("权限种子复用了已下线主键: id=%d retired_module=%s", id, retiredModule)
+		}
+		if _, exists := seenIDs[id]; exists {
+			t.Fatalf("权限种子 id 重复: %d", id)
+		}
+		seenIDs[id] = struct{}{}
+		previousID = id
+
+		uuid := strings.TrimSpace(row[2])
+		if uuid == "" {
+			t.Fatalf("权限 uuid 不能为空: id=%d", id)
+		}
+		if _, exists := seenUUIDs[uuid]; exists {
+			t.Fatalf("权限 uuid 重复: id=%d uuid=%s", id, uuid)
+		}
+		seenUUIDs[uuid] = struct{}{}
+
+		pid, err := strconv.Atoi(row[3])
 		if err != nil {
 			t.Fatalf("解析权限 pid 失败 id=%d: %v", id, err)
 		}
 		if pid >= id {
 			t.Fatalf("权限父节点必须先于子节点: id=%d pid=%d", id, pid)
 		}
-		pids := strings.TrimSpace(row[3])
+		pids := strings.TrimSpace(row[4])
 		if pid == 0 && pids != "" {
 			t.Fatalf("根权限 pids 必须为空: id=%d pids=%s", id, pids)
 		}
-		if pid > 0 && !strings.HasSuffix(","+pids, ","+strconv.Itoa(pid)) {
-			t.Fatalf("权限祖先链末级必须等于 pid: id=%d pid=%d pids=%s", id, pid, pids)
+		if pid > 0 {
+			parentChain, exists := ancestorChains[pid]
+			if !exists {
+				t.Fatalf("权限父节点未在当前项之前声明: id=%d pid=%d", id, pid)
+			}
+			expectedPIDs := strconv.Itoa(pid)
+			if parentChain != "" {
+				expectedPIDs = parentChain + "," + expectedPIDs
+			}
+			if pids != expectedPIDs {
+				t.Fatalf("权限祖先链不匹配: id=%d pid=%d pids=%s expected=%s", id, pid, pids, expectedPIDs)
+			}
 		}
+		ancestorChains[id] = pids
 	}
 }
 

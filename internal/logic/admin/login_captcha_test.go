@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
 
 	codes "admin/common/codes"
 	keys "admin/common/rediskeys"
@@ -21,7 +23,9 @@ import (
 	"admin/internal/types"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/golang/freetype/truetype"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/image/font"
 )
 
 // newTestAdminCaptchaLogic 创建仅包含 Redis 的登录验证码测试逻辑对象。
@@ -109,25 +113,247 @@ func TestVerifyLoginCaptchaRejectsWrongCode(t *testing.T) {
 	}
 }
 
+// TestVerifyLoginCaptchaIgnoresLetterCase 验证主验证码显示大小写不会改变登录校验结果，且成功后仍单次消费。
+func TestVerifyLoginCaptchaIgnoresLetterCase(t *testing.T) {
+	logicObj, _ := newTestAdminCaptchaLogic(t)
+	const (
+		key       = "mixed-case"
+		savedCode = "aB7w"
+		inputCode = "Ab7W"
+	)
+	cacheKey := logicObj.AppRedisKey(fmt.Sprintf(keys.LoginCaptcha, key))
+	if err := logicObj.Redis().Set(context.Background(), cacheKey, savedCode, time.Minute).Err(); err != nil {
+		t.Fatalf("写入混合大小写验证码失败: %v", err)
+	}
+	resp := logicObj.VerifyLoginCaptcha(key, inputCode)
+	if resp == nil || resp.IsFailure() {
+		t.Fatalf("VerifyLoginCaptcha(%q) = %#v, want success", inputCode, resp)
+	}
+	if logicObj.Redis().Exists(context.Background(), cacheKey).Val() != 0 {
+		t.Fatalf("VerifyLoginCaptcha(%q) 后未消费 key %s", inputCode, cacheKey)
+	}
+}
+
 // TestDrawLoginCaptchaBaseFrameKeepsTextInsideImage 验证宽字符在动态图片的基础帧内不会贴边裁切。
 func TestDrawLoginCaptchaBaseFrameKeepsTextInsideImage(t *testing.T) {
-	for range 20 {
-		captchaImage, err := drawLoginCaptchaBaseFrame("WMWM")
-		if err != nil {
-			t.Fatalf("drawLoginCaptchaBaseFrame() error = %v", err)
-		}
-		bounds := captchaImage.Bounds()
-		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			for x := bounds.Min.X; x < bounds.Max.X; x++ {
-				red, green, blue, _ := captchaImage.At(x, y).RGBA()
-				if !isLoginCaptchaTextPixel(red, green, blue) {
-					continue
-				}
-				if x <= bounds.Min.X+1 || x >= bounds.Max.X-2 || y <= bounds.Min.Y+1 || y >= bounds.Max.Y-2 {
-					t.Fatalf("验证码深色文字像素贴边: x=%d y=%d bounds=%v", x, y, bounds)
+	for _, code := range []string{"WMWM", "agyp"} {
+		for range 20 {
+			captchaImage, err := drawLoginCaptchaBaseFrame(code)
+			if err != nil {
+				t.Fatalf("drawLoginCaptchaBaseFrame(%q) error = %v", code, err)
+			}
+			bounds := captchaImage.Bounds()
+			for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+				for x := bounds.Min.X; x < bounds.Max.X; x++ {
+					red, green, blue, _ := captchaImage.At(x, y).RGBA()
+					if !isLoginCaptchaTextPixel(red, green, blue) {
+						continue
+					}
+					if x <= bounds.Min.X+1 || x >= bounds.Max.X-2 || y <= bounds.Min.Y+1 || y >= bounds.Max.Y-2 {
+						t.Fatalf("验证码 %q 深色文字像素贴边: x=%d y=%d bounds=%v", code, x, y, bounds)
+					}
 				}
 			}
 		}
+	}
+}
+
+// TestGenerateLoginCaptchaCodeCoversRequestedGroups 验证主验证码只使用安全基础字符，并能随机显示大写、小写和数字。
+func TestGenerateLoginCaptchaCodeCoversRequestedGroups(t *testing.T) {
+	allowed := make(map[rune]struct{}, len(loginCaptchaAlphabet))
+	for _, character := range loginCaptchaAlphabet {
+		allowed[character] = struct{}{}
+	}
+	containsLower, containsUpper, containsDigit := false, false, false
+	for range 256 {
+		code, err := generateLoginCaptchaCode(loginCaptchaLength)
+		if err != nil {
+			t.Fatalf("generateLoginCaptchaCode() error = %v", err)
+		}
+		if len([]rune(code)) != loginCaptchaLength {
+			t.Fatalf("generateLoginCaptchaCode() length = %d, want %d", len([]rune(code)), loginCaptchaLength)
+		}
+		for _, character := range code {
+			if _, ok := allowed[unicode.ToUpper(character)]; !ok {
+				t.Fatalf("主验证码包含基础字符集之外的字符 %q", character)
+			}
+			containsLower = containsLower || unicode.IsLower(character)
+			containsUpper = containsUpper || unicode.IsUpper(character)
+			containsDigit = containsDigit || unicode.IsDigit(character)
+		}
+	}
+	if !containsLower || !containsUpper || !containsDigit {
+		t.Fatalf("主验证码随机分类不完整: lower=%t upper=%t digit=%t", containsLower, containsUpper, containsDigit)
+	}
+}
+
+// TestLoginCaptchaBackgroundCharacterSetCoversRequestedGroups 验证背景固定绘制 12 个干扰字符，且字符集包含小写字母、大写字母和数字。
+func TestLoginCaptchaBackgroundCharacterSetCoversRequestedGroups(t *testing.T) {
+	if loginCaptchaBackgroundCharacterCount != 12 {
+		t.Fatalf("背景干扰字符数量=%d，期望 12", loginCaptchaBackgroundCharacterCount)
+	}
+	if loginCaptchaBackgroundCharacterFontSize != 18 {
+		t.Fatalf("背景干扰字符字号=%v，期望 18pt", loginCaptchaBackgroundCharacterFontSize)
+	}
+	if loginCaptchaGuideLineCount != 3 {
+		t.Fatalf("背景波浪引导线数量=%d，期望 3", loginCaptchaGuideLineCount)
+	}
+	if loginCaptchaBottomSnowflakeCount != 3 || loginCaptchaBottomStarCount != 3 {
+		t.Fatalf("最底层图案数量 snowflake=%d star=%d，期望各 3 个", loginCaptchaBottomSnowflakeCount, loginCaptchaBottomStarCount)
+	}
+	containsLower, containsUpper, containsDigit := false, false, false
+	for _, character := range loginCaptchaBackgroundCharacterSet {
+		containsLower = containsLower || unicode.IsLower(character)
+		containsUpper = containsUpper || unicode.IsUpper(character)
+		containsDigit = containsDigit || unicode.IsDigit(character)
+	}
+	if !containsLower || !containsUpper || !containsDigit {
+		t.Fatalf("背景字符集分类不完整: lower=%t upper=%t digit=%t", containsLower, containsUpper, containsDigit)
+	}
+}
+
+// TestLoginCaptchaBackgroundPositionsAvoidOverlap 验证 12 个 18pt 宽字符可在 64 次候选评估内找到互不重叠的位置。
+func TestLoginCaptchaBackgroundPositionsAvoidOverlap(t *testing.T) {
+	face := truetype.NewFace(loginCaptchaFont, &truetype.Options{
+		DPI:     loginCaptchaDPI,
+		Hinting: font.HintingFull,
+		Size:    loginCaptchaBackgroundCharacterFontSize,
+	})
+	defer face.Close()
+	drawer := font.Drawer{Face: face}
+	imageBounds := image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight)
+	occupied := make([]image.Rectangle, 0, loginCaptchaBackgroundCharacterCount)
+	for index := range loginCaptchaBackgroundCharacterCount {
+		_, _, inkBounds := loginCaptchaBackgroundPosition(
+			&drawer,
+			"W",
+			index,
+			0.271,
+			0.137,
+			imageBounds,
+			occupied,
+		)
+		if overlap := loginCaptchaBackgroundOverlapArea(inkBounds, occupied); overlap != 0 {
+			t.Fatalf("背景字符 %d 与既有字符重叠面积=%d bounds=%v occupied=%v", index, overlap, inkBounds, occupied)
+		}
+		occupied = append(occupied, inkBounds)
+	}
+}
+
+// TestDrawLoginCaptchaGradientBackgroundUsesTwoLightColors 验证静态底图存在颜色渐变，并保持浅色以免压过主验证码。
+func TestDrawLoginCaptchaGradientBackgroundUsesTwoLightColors(t *testing.T) {
+	canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
+	random := captchaImageRandom{}
+	drawLoginCaptchaGradientBackground(canvas, &random)
+	start := canvas.NRGBAAt(0, loginCaptchaImageHeight/2)
+	end := canvas.NRGBAAt(loginCaptchaImageWidth-1, loginCaptchaImageHeight/2)
+	if start == end {
+		t.Fatalf("渐变背景首尾颜色相同: start=%#v end=%#v", start, end)
+	}
+	for _, pixel := range []color.NRGBA{start, end, canvas.NRGBAAt(loginCaptchaImageWidth/2, loginCaptchaImageHeight/2)} {
+		if int(pixel.R)+int(pixel.G)+int(pixel.B) < 700 {
+			t.Fatalf("渐变背景颜色过深: %#v", pixel)
+		}
+	}
+}
+
+// TestDrawLoginCaptchaGuideWaveHasPeaksAndValleys 验证背景导线使用正弦波轨迹而不是水平线或斜直线。
+func TestDrawLoginCaptchaGuideWaveHasPeaksAndValleys(t *testing.T) {
+	canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
+	lineColor := color.RGBA{R: 1, G: 2, B: 3, A: 255}
+	const (
+		baseY      = 22
+		amplitude  = 4
+		wavelength = 32
+	)
+	drawLoginCaptchaGuideWave(canvas, baseY, amplitude, wavelength, 0, lineColor)
+	for _, point := range []image.Point{
+		{X: 0, Y: baseY},
+		{X: wavelength / 4, Y: baseY + amplitude},
+		{X: wavelength / 2, Y: baseY},
+		{X: wavelength * 3 / 4, Y: baseY - amplitude},
+	} {
+		if actual := canvas.NRGBAAt(point.X, point.Y); actual != color.NRGBAModel.Convert(lineColor).(color.NRGBA) {
+			t.Fatalf("正弦导线关键点 %v 像素=%#v，期望 %#v", point, actual, lineColor)
+		}
+	}
+}
+
+// TestDrawLoginCaptchaBackgroundCharactersStayVisibleAndScattered 验证背景字符保持可见的中浅色并横纵分散，不与主验证码争夺视觉层级。
+func TestDrawLoginCaptchaBackgroundCharactersStayVisibleAndScattered(t *testing.T) {
+	background := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
+	for y := 0; y < loginCaptchaImageHeight; y++ {
+		for x := 0; x < loginCaptchaImageWidth; x++ {
+			canvas.SetNRGBA(x, y, background)
+		}
+	}
+	random := captchaImageRandom{}
+	for index := range random.values {
+		random.values[index] = byte((index*37 + 11) % 256)
+	}
+	if err := drawLoginCaptchaBackgroundCharacters(canvas, &random); err != nil {
+		t.Fatalf("drawLoginCaptchaBackgroundCharacters() error = %v", err)
+	}
+
+	minX, minY := loginCaptchaImageWidth, loginCaptchaImageHeight
+	maxX, maxY := 0, 0
+	changedPixels := 0
+	darkestPixelBrightness := 255 * 3
+	for y := 0; y < loginCaptchaImageHeight; y++ {
+		for x := 0; x < loginCaptchaImageWidth; x++ {
+			pixel := canvas.NRGBAAt(x, y)
+			if pixel == background {
+				continue
+			}
+			changedPixels++
+			minX, maxX = min(minX, x), max(maxX, x)
+			minY, maxY = min(minY, y), max(maxY, y)
+			brightness := int(pixel.R) + int(pixel.G) + int(pixel.B)
+			darkestPixelBrightness = min(darkestPixelBrightness, brightness)
+			if brightness < 500 {
+				t.Fatalf("背景字符像素过深: x=%d y=%d color=%#v", x, y, pixel)
+			}
+		}
+	}
+	if changedPixels == 0 {
+		t.Fatal("背景干扰字符未绘制任何像素")
+	}
+	if darkestPixelBrightness > 570 {
+		t.Fatalf("背景字符与浅色底图对比不足: darkest_brightness=%d", darkestPixelBrightness)
+	}
+	if maxX-minX < loginCaptchaImageWidth/2 || maxY-minY < loginCaptchaImageHeight/3 {
+		t.Fatalf("背景字符分布过于集中: x=%d..%d y=%d..%d", minX, maxX, minY, maxY)
+	}
+	if minX > loginCaptchaImageWidth/10 || maxX < loginCaptchaImageWidth*9/10 || minY > 10 || maxY < loginCaptchaImageHeight-10 {
+		t.Fatalf("背景字符未覆盖图片边缘区域: x=%d..%d y=%d..%d", minX, maxX, minY, maxY)
+	}
+}
+
+// TestLoginCaptchaBackgroundPositionAllowsTouchingImageEdge 验证背景字符不再预留内边距，候选点可以贴到图片左边界。
+func TestLoginCaptchaBackgroundPositionAllowsTouchingImageEdge(t *testing.T) {
+	face := truetype.NewFace(loginCaptchaFont, &truetype.Options{
+		DPI:     loginCaptchaDPI,
+		Hinting: font.HintingFull,
+		Size:    loginCaptchaBackgroundCharacterFontSize,
+	})
+	defer face.Close()
+	drawer := font.Drawer{Face: face}
+	imageBounds := image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight)
+	_, _, inkBounds := loginCaptchaBackgroundPosition(
+		&drawer,
+		"W",
+		0,
+		0,
+		0.137,
+		imageBounds,
+		nil,
+	)
+	if inkBounds.Min.X != imageBounds.Min.X {
+		t.Fatalf("背景字符左边界=%d，期望允许贴到图片左边界 %d", inkBounds.Min.X, imageBounds.Min.X)
+	}
+	if !inkBounds.In(imageBounds) {
+		t.Fatalf("背景字符边界=%v，期望仍位于图片范围 %v 内", inkBounds, imageBounds)
 	}
 }
 
@@ -172,8 +398,8 @@ func TestDrawLoginCaptchaRainbowBandUsesOpaqueMovingLines(t *testing.T) {
 	}
 }
 
-// TestDrawLoginCaptchaHorizontalRainbowLineMoves 验证横向彩虹线逐帧改变位置且使用完全不透明像素。
-func TestDrawLoginCaptchaHorizontalRainbowLineMoves(t *testing.T) {
+// TestDrawLoginCaptchaHorizontalRainbowLinesMove 验证 3 条横向彩虹线纵向错开、逐帧移动且使用完全不透明像素。
+func TestDrawLoginCaptchaHorizontalRainbowLinesMove(t *testing.T) {
 	newCanvas := func() *image.NRGBA {
 		canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
 		for y := 0; y < loginCaptchaImageHeight; y++ {
@@ -185,8 +411,8 @@ func TestDrawLoginCaptchaHorizontalRainbowLineMoves(t *testing.T) {
 	}
 	first := newCanvas()
 	second := newCanvas()
-	drawLoginCaptchaHorizontalRainbowLine(first, 0)
-	drawLoginCaptchaHorizontalRainbowLine(second, loginCaptchaAnimationFrameCount/4)
+	drawLoginCaptchaHorizontalRainbowLines(first, 0)
+	drawLoginCaptchaHorizontalRainbowLines(second, loginCaptchaAnimationFrameCount/4)
 	if bytes.Equal(first.Pix, second.Pix) {
 		t.Fatal("横向彩虹线在四分之一周期后必须改变位置")
 	}
@@ -205,10 +431,20 @@ func TestDrawLoginCaptchaHorizontalRainbowLineMoves(t *testing.T) {
 			t.Fatal("横向彩虹线未绘制任何彩色像素")
 		}
 	}
+	coloredRows := map[int]struct{}{}
+	for y := 0; y < loginCaptchaImageHeight; y++ {
+		pixel := first.NRGBAAt(loginCaptchaImageWidth/2, y)
+		if pixel.R != 255 || pixel.G != 255 || pixel.B != 255 {
+			coloredRows[y] = struct{}{}
+		}
+	}
+	if len(coloredRows) < loginCaptchaHorizontalRainbowLineCount {
+		t.Fatalf("图片中心仅覆盖 %d 个彩色行，期望至少对应 %d 条横向线", len(coloredRows), loginCaptchaHorizontalRainbowLineCount)
+	}
 }
 
-// TestLoginCaptchaCharactersHideLeftToRightAndJump 验证每 3 帧只隐藏一个字符，隐藏位置从左到右推进且字符轨迹发生跳动。
-func TestLoginCaptchaCharactersHideLeftToRightAndJump(t *testing.T) {
+// TestLoginCaptchaCharactersHideJumpAndTilt 验证每 2 帧只隐藏一个字符，隐藏位置从左到右推进且字符轨迹发生跳动和偏转。
+func TestLoginCaptchaCharactersHideJumpAndTilt(t *testing.T) {
 	const code = "1234"
 	random := captchaImageRandom{}
 	render := func(frameIndex int, hiddenCharacterIndex int) *image.NRGBA {
@@ -250,7 +486,30 @@ func TestLoginCaptchaCharactersHideLeftToRightAndJump(t *testing.T) {
 		}
 	}
 	if bytes.Equal(render(0, -1).Pix, render(loginCaptchaAnimationFrameCount/4, -1).Pix) {
-		t.Fatal("字符在四分之一周期后必须改变纵向位置")
+		t.Fatal("字符在四分之一周期后必须改变纵向位置或偏转角")
+	}
+}
+
+// TestLoginCaptchaCharacterTiltStaysBounded 验证随机基础偏角叠加逐帧摆动后不超过正负十度，且相邻阶段角度确实变化。
+func TestLoginCaptchaCharacterTiltStaysBounded(t *testing.T) {
+	for _, baseTilt := range []int{-loginCaptchaCharacterBaseTiltDegrees, loginCaptchaCharacterBaseTiltDegrees} {
+		for characterIndex := range loginCaptchaLength {
+			previous := loginCaptchaCharacterTilt(baseTilt, 0, characterIndex)
+			changed := false
+			for frameIndex := 1; frameIndex < loginCaptchaAnimationFrameCount; frameIndex++ {
+				angle := loginCaptchaCharacterTilt(baseTilt, frameIndex, characterIndex)
+				if math.Abs(angle) > loginCaptchaCharacterBaseTiltDegrees+loginCaptchaCharacterTiltSwingDegrees+0.0001 {
+					t.Fatalf("基础偏角 %d 字符 %d 第 %d 帧偏角=%f，超过允许上限", baseTilt, characterIndex, frameIndex, angle)
+				}
+				if math.Abs(angle-previous) > 0.0001 {
+					changed = true
+				}
+				previous = angle
+			}
+			if !changed {
+				t.Fatalf("基础偏角 %d 字符 %d 的逐帧偏角未变化", baseTilt, characterIndex)
+			}
+		}
 	}
 }
 

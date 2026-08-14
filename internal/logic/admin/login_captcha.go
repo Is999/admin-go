@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 	"time"
+	"unicode"
 
 	codes "admin/common/codes"
 	i18n "admin/common/i18n"
@@ -23,7 +24,7 @@ const (
 	loginCaptchaLength = 4
 )
 
-// loginCaptchaAlphabet 定义验证码可选字符，去掉易混淆字符。
+// loginCaptchaAlphabet 定义大小写不敏感的验证码基础字符；字母生成后随机显示为大写或小写，避免重复字符降低有效答案空间。
 var loginCaptchaAlphabet = []rune("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
 
 // BuildLoginCaptcha 生成登录图形验证码并写入 Redis。
@@ -103,7 +104,17 @@ func generateLoginCaptchaCode(length int) (string, error) {
 		if err != nil {
 			return "", errors.Tag(err)
 		}
-		builder.WriteRune(loginCaptchaAlphabet[index])
+		character := loginCaptchaAlphabet[index]
+		if unicode.IsLetter(character) {
+			letterCase, caseErr := randomInt(2)
+			if caseErr != nil {
+				return "", errors.Tag(caseErr)
+			}
+			if letterCase == 1 {
+				character = unicode.ToLower(character)
+			}
+		}
+		builder.WriteRune(character)
 	}
 	return builder.String(), nil
 }

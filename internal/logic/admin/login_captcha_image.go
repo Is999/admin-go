@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/color/palette"
 	"image/draw"
 	"image/gif"
 	"math"
@@ -29,16 +28,24 @@ const (
 	loginCaptchaFontSize = 31
 	// loginCaptchaPaddingX 表示验证码左右安全留白，避免字符贴边裁切。
 	loginCaptchaPaddingX = 6
-	// loginCaptchaGuideLineCount 表示每张验证码绘制 5 条背景淡线；线条先于文字绘制，避免遮挡字符。
-	loginCaptchaGuideLineCount = 5
-	// loginCaptchaSnowflakeCount 表示每张验证码固定绘制 4 个雪花，避免随机图案分配导致雪花缺失。
-	loginCaptchaSnowflakeCount = 4
-	// loginCaptchaNoiseMarkCount 表示每张验证码的图案噪声总数；4 个前景雪花之外的 5 个背景图案随机使用五星或圆点。
-	loginCaptchaNoiseMarkCount = 9
+	// loginCaptchaGuideLineCount 表示每张验证码绘制 3 条背景淡色波浪线；线条先于文字绘制，避免遮挡字符。
+	loginCaptchaGuideLineCount = 3
+	// loginCaptchaBottomSnowflakeCount 表示渐变底图上绘制 3 个浅色雪花，位于引导线和所有字符下方。
+	loginCaptchaBottomSnowflakeCount = 3
+	// loginCaptchaBottomStarCount 表示渐变底图上绘制 3 个浅色五星，位于引导线和所有字符下方。
+	loginCaptchaBottomStarCount = 3
+	// loginCaptchaBackgroundCharacterCount 表示共享背景固定绘制 12 个大小写字母或数字，字符不参与验证码答案。
+	loginCaptchaBackgroundCharacterCount = 12
+	// loginCaptchaBackgroundCharacterFontSize 表示背景字符字号，单位 point；18pt 兼顾干扰可见度和 12 个字符的分散空间。
+	loginCaptchaBackgroundCharacterFontSize = 18
+	// loginCaptchaBackgroundCharacterVerticalJitter 表示低差异纵向基线叠加的随机偏移上限，单位像素。
+	loginCaptchaBackgroundCharacterVerticalJitter = 1
+	// loginCaptchaBackgroundPlacementAttempts 表示每个背景字符最多评估 64 个候选点；最宽字形仍需优先找到不重叠位置。
+	loginCaptchaBackgroundPlacementAttempts = 64
 	// loginCaptchaForegroundCurveCount 表示文字上方绘制 2 条彩色波浪曲线，用单像素交叉轨迹增加字符分割难度。
 	loginCaptchaForegroundCurveCount = 2
-	// loginCaptchaAnimationFrameCount 表示动态验证码包含 12 帧；配合单帧延迟后完整循环约 2.16 秒。
-	loginCaptchaAnimationFrameCount = 12
+	// loginCaptchaAnimationFrameCount 表示动态验证码包含 8 帧；配合单帧延迟后完整循环约 1.44 秒，每个主字符连续隐藏 2 帧。
+	loginCaptchaAnimationFrameCount = 8
 	// loginCaptchaFrameDelayCentiseconds 表示 GIF 单帧停留 18 厘秒，即 180 毫秒。
 	loginCaptchaFrameDelayCentiseconds = 18
 	// loginCaptchaRainbowBandCount 表示动态图片内同时移动 2 条彩虹波浪带。
@@ -51,22 +58,36 @@ const (
 	loginCaptchaRainbowSolidLineCount = 3
 	// loginCaptchaHorizontalWaveAmplitude 表示横向彩虹线相对中心轨迹的上下振幅，单位像素。
 	loginCaptchaHorizontalWaveAmplitude = 3
+	// loginCaptchaHorizontalRainbowLineCount 表示动态图片内同时绘制 3 条横向彩虹波浪线。
+	loginCaptchaHorizontalRainbowLineCount = 3
+	// loginCaptchaHorizontalRainbowLineSpacing 表示 3 条横向彩虹线的中心轨迹间距，单位像素。
+	loginCaptchaHorizontalRainbowLineSpacing = 7
 	// loginCaptchaHorizontalSweepAmplitude 表示横向彩虹线逐帧上下摆动的最大距离，单位像素。
 	loginCaptchaHorizontalSweepAmplitude = 8
 	// loginCaptchaCharacterJumpAmplitude 表示每个字符逐帧上下跳动的最大距离，单位像素。
 	loginCaptchaCharacterJumpAmplitude = 3
+	// loginCaptchaCharacterBaseTiltDegrees 表示每个主字符的随机基础偏角上限，单位度，实际范围为 -7 至 +7。
+	loginCaptchaCharacterBaseTiltDegrees = 7
+	// loginCaptchaCharacterTiltSwingDegrees 表示主字符逐帧摆动的角度振幅，单位度；与基础偏角合成后不超过正负 10 度。
+	loginCaptchaCharacterTiltSwingDegrees = 3
+	// loginCaptchaCharacterGlyphPadding 表示旋转字符槽位的水平透明留白，单位像素，避免小角度偏转裁切笔画。
+	loginCaptchaCharacterGlyphPadding = 5
 	// loginCaptchaRainbowSlantDegrees 表示波浪带相对垂直方向向右倾斜的角度。
 	loginCaptchaRainbowSlantDegrees = 14
-	// loginCaptchaRainbowPrimaryAlpha 表示主波浪带 40% 的不透明度。
-	loginCaptchaRainbowPrimaryAlpha = 102
-	// loginCaptchaRainbowSecondaryAlpha 表示次波浪带约 32% 的不透明度。
-	loginCaptchaRainbowSecondaryAlpha = 82
+	// loginCaptchaRainbowPrimaryAlpha 表示主波浪带约 36% 的不透明度；带内实体线仍保持完全不透明。
+	loginCaptchaRainbowPrimaryAlpha = 92
+	// loginCaptchaRainbowSecondaryAlpha 表示次波浪带约 28% 的不透明度；带内实体线仍保持完全不透明。
+	loginCaptchaRainbowSecondaryAlpha = 72
 	// loginCaptchaDPI 表示验证码字体渲染 DPI。
 	loginCaptchaDPI = 72
 	// loginCaptchaMimeType 表示验证码图片 MIME 类型。
 	loginCaptchaMimeType = "image/gif"
-	// loginCaptchaRandomBytes 表示单张图片预读的随机字节数；96 字节覆盖背景、线条、图案和文字偏移的当前取值次数。
-	loginCaptchaRandomBytes = 96
+	// loginCaptchaRandomBytes 表示单张图片预读的随机字节数；160 字节覆盖渐变、背景字符、线条和主字符偏移，避免本轮取值回绕复用。
+	loginCaptchaRandomBytes = 160
+	// loginCaptchaPaletteLookupBits 表示调色板查找表为每个 RGB 通道保留 5 bit，查找表固定占用 32KB。
+	loginCaptchaPaletteLookupBits = 5
+	// loginCaptchaPaletteLookupSize 表示 5-bit RGB 组合总数。
+	loginCaptchaPaletteLookupSize = 1 << (loginCaptchaPaletteLookupBits * 3)
 )
 
 // captchaImageRandom 保存单张图片的随机数据，避免每个噪声点单独读取系统随机源。
@@ -94,16 +115,17 @@ var loginCaptchaGuideLineColors = []color.RGBA{
 	{R: 188, G: 215, B: 198, A: 255},
 }
 
-// loginCaptchaNoiseMarkColors 定义登录验证码图案噪声颜色池。
-var loginCaptchaNoiseMarkColors = []color.RGBA{
-	{R: 198, G: 211, B: 234, A: 255},
-	{R: 214, G: 198, B: 238, A: 255},
-	{R: 232, G: 202, B: 221, A: 255},
-	{R: 197, G: 226, B: 209, A: 255},
-	{R: 236, G: 219, B: 162, A: 255},
-	{R: 203, G: 226, B: 230, A: 255},
-	{R: 230, G: 207, B: 186, A: 255},
-	{R: 210, G: 222, B: 187, A: 255},
+// loginCaptchaBackgroundCharacterSet 定义背景噪声使用的大小写英文字母和数字；这些字符只增加分割干扰，不进入 Redis 验证答案。
+var loginCaptchaBackgroundCharacterSet = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+// loginCaptchaBackgroundCharacterColors 定义背景字符中浅色池；颜色与浅色底图保持可见对比，同时弱于主验证码的深色字形。
+var loginCaptchaBackgroundCharacterColors = []color.RGBA{
+	{R: 150, G: 174, B: 201, A: 255},
+	{R: 174, G: 151, B: 201, A: 255},
+	{R: 201, G: 157, B: 179, A: 255},
+	{R: 151, G: 189, B: 168, A: 255},
+	{R: 198, G: 182, B: 137, A: 255},
+	{R: 153, G: 184, B: 191, A: 255},
 }
 
 // loginCaptchaForegroundCurveColors 定义前景波浪曲线颜色池；颜色保持明亮，避免单像素曲线遮蔽字符主体。
@@ -144,6 +166,60 @@ var loginCaptchaTextColors = []color.RGBA{
 	{R: 79, G: 70, B: 229, A: 255},
 }
 
+// loginCaptchaGIFPalette 收口验证码已知颜色及彩虹中间色；固定小调色板配合无抖动量化，减少逐帧转换时间和 GIF 噪声体积。
+var loginCaptchaGIFPalette = buildLoginCaptchaGIFPalette()
+
+// loginCaptchaPaletteLookup 保存 5-bit RGB 到固定 GIF 调色板索引的最近色映射，避免每帧每像素线性扫描调色板。
+var loginCaptchaPaletteLookup = buildLoginCaptchaPaletteLookup()
+
+// buildLoginCaptchaGIFPalette 从验证码现有颜色池构建共享调色板，避免维护第二套与绘制颜色漂移的枚举。
+func buildLoginCaptchaGIFPalette() color.Palette {
+	colorGroups := [][]color.RGBA{
+		loginCaptchaBackgroundColors,
+		loginCaptchaGuideLineColors,
+		loginCaptchaBackgroundCharacterColors,
+		loginCaptchaForegroundCurveColors,
+		loginCaptchaRainbowColors,
+		loginCaptchaTextColors,
+	}
+	result := make(color.Palette, 0, 160)
+	for _, colors := range colorGroups {
+		for _, item := range colors {
+			result = append(result, item)
+		}
+	}
+	for index, current := range loginCaptchaRainbowColors {
+		next := loginCaptchaRainbowColors[(index+1)%len(loginCaptchaRainbowColors)]
+		for _, fraction := range []int{64, 128, 192} {
+			result = append(result, interpolateLoginCaptchaColor(current, next, fraction))
+		}
+	}
+	for startIndex, start := range loginCaptchaBackgroundColors {
+		for endIndex := startIndex + 1; endIndex < len(loginCaptchaBackgroundColors); endIndex++ {
+			end := loginCaptchaBackgroundColors[endIndex]
+			for _, fraction := range []int{32, 64, 96, 128, 160, 192, 224} {
+				result = append(result, interpolateLoginCaptchaColor(start, end, fraction))
+			}
+		}
+	}
+	return result
+}
+
+// buildLoginCaptchaPaletteLookup 在进程初始化期一次性计算 32KB 最近色表，运行期验证码请求只执行数组索引。
+func buildLoginCaptchaPaletteLookup() [loginCaptchaPaletteLookupSize]uint8 {
+	result := [loginCaptchaPaletteLookupSize]uint8{}
+	channelShift := 8 - loginCaptchaPaletteLookupBits
+	channelMask := 1<<loginCaptchaPaletteLookupBits - 1
+	halfStep := 1 << (channelShift - 1)
+	for key := range loginCaptchaPaletteLookupSize {
+		red := uint8(((key>>(loginCaptchaPaletteLookupBits*2))&channelMask)<<channelShift + halfStep)
+		green := uint8(((key>>loginCaptchaPaletteLookupBits)&channelMask)<<channelShift + halfStep)
+		blue := uint8((key&channelMask)<<channelShift + halfStep)
+		result[key] = uint8(loginCaptchaGIFPalette.Index(color.NRGBA{R: red, G: green, B: blue, A: 255}))
+	}
+	return result
+}
+
 // buildLoginCaptchaImageDataURL 把验证码文本渲染成循环 GIF data URL。
 func buildLoginCaptchaImageDataURL(code string) (string, error) {
 	imageBytes, err := drawLoginCaptchaGIF(code)
@@ -157,7 +233,7 @@ func buildLoginCaptchaImageDataURL(code string) (string, error) {
 	), nil
 }
 
-// drawLoginCaptchaGIF 编码循环 GIF；字符错相位跳动并从左到右逐个隐藏，两条彩虹波浪带按半周期错位移动。
+// drawLoginCaptchaGIF 编码循环 GIF；字符错相位跳动并从左到右逐个隐藏，两条竖向波浪带与三条横向波浪线在字符上层移动。
 func drawLoginCaptchaGIF(code string) ([]byte, error) {
 	code = strings.TrimSpace(code)
 	staticFrame, textRandom, err := drawLoginCaptchaStaticFrame(code)
@@ -178,12 +254,10 @@ func drawLoginCaptchaGIF(code string) ([]byte, error) {
 		if err = drawLoginCaptchaText(frame, code, &frameRandom, frameIndex, hiddenCharacterIndex); err != nil {
 			return nil, errors.Tag(err)
 		}
-		drawLoginCaptchaForegroundSnowflakes(frame, &frameRandom)
 		drawLoginCaptchaForegroundCurves(frame, &frameRandom)
 		drawLoginCaptchaRainbowBands(frame, frameIndex)
-		drawLoginCaptchaHorizontalRainbowLine(frame, frameIndex)
-		paletted := image.NewPaletted(frame.Bounds(), palette.Plan9)
-		draw.FloydSteinberg.Draw(paletted, paletted.Bounds(), frame, frame.Bounds().Min)
+		drawLoginCaptchaHorizontalRainbowLines(frame, frameIndex)
+		paletted := convertLoginCaptchaPaletted(frame)
 		animation.Image = append(animation.Image, paletted)
 		animation.Delay = append(animation.Delay, loginCaptchaFrameDelayCentiseconds)
 		animation.Disposal = append(animation.Disposal, gif.DisposalNone)
@@ -193,6 +267,25 @@ func drawLoginCaptchaGIF(code string) ([]byte, error) {
 		return nil, errors.Wrap(err, "编码登录验证码 GIF 失败")
 	}
 	return buffer.Bytes(), nil
+}
+
+// convertLoginCaptchaPaletted 使用预计算的 5-bit RGB 查找表转换 GIF 帧，保留固定调色板并避免通用逐像素最近色扫描。
+func convertLoginCaptchaPaletted(frame *image.NRGBA) *image.Paletted {
+	paletted := image.NewPaletted(frame.Bounds(), loginCaptchaGIFPalette)
+	channelShift := 8 - loginCaptchaPaletteLookupBits
+	bounds := frame.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		sourceOffset := frame.PixOffset(bounds.Min.X, y)
+		targetOffset := paletted.PixOffset(bounds.Min.X, y)
+		for x := 0; x < bounds.Dx(); x++ {
+			pixelOffset := sourceOffset + x*4
+			key := int(frame.Pix[pixelOffset]>>channelShift)<<(loginCaptchaPaletteLookupBits*2) |
+				int(frame.Pix[pixelOffset+1]>>channelShift)<<loginCaptchaPaletteLookupBits |
+				int(frame.Pix[pixelOffset+2]>>channelShift)
+			paletted.Pix[targetOffset+x] = loginCaptchaPaletteLookup[key]
+		}
+	}
+	return paletted
 }
 
 // drawLoginCaptchaStaticFrame 绘制各帧共享的背景，返回相同的文字随机起点以稳定字符颜色和基础偏移。
@@ -205,12 +298,66 @@ func drawLoginCaptchaStaticFrame(code string) (*image.NRGBA, captchaImageRandom,
 	if _, err := rand.Read(random.values[:]); err != nil {
 		return nil, captchaImageRandom{}, errors.Wrap(err, "读取登录验证码图片随机数据失败")
 	}
-	background := random.color(loginCaptchaBackgroundColors)
 	canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
-	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: background}, image.Point{}, draw.Src)
+	drawLoginCaptchaGradientBackground(canvas, random)
+	drawLoginCaptchaBottomMarks(canvas, random)
 	drawLoginCaptchaGuideLines(canvas, random)
-	drawLoginCaptchaNoiseMarks(canvas, random)
+	if err := drawLoginCaptchaBackgroundCharacters(canvas, random); err != nil {
+		return nil, captchaImageRandom{}, errors.Tag(err)
+	}
 	return canvas, *random, nil
+}
+
+// drawLoginCaptchaGradientBackground 使用两种不同浅色和随机方向填充渐变，保证背景变化不依赖前端 CSS。
+func drawLoginCaptchaGradientBackground(canvas *image.NRGBA, random *captchaImageRandom) {
+	startIndex := random.intn(len(loginCaptchaBackgroundColors))
+	endIndex := random.intn(len(loginCaptchaBackgroundColors) - 1)
+	if endIndex >= startIndex {
+		endIndex++
+	}
+	startColor := loginCaptchaBackgroundColors[startIndex]
+	endColor := loginCaptchaBackgroundColors[endIndex]
+	direction := random.intn(4)
+	bounds := canvas.Bounds()
+	width := max(1, bounds.Dx()-1)
+	height := max(1, bounds.Dy()-1)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			relativeX := x - bounds.Min.X
+			relativeY := y - bounds.Min.Y
+			position, length := relativeX, width
+			switch direction {
+			case 1:
+				position, length = relativeY, height
+			case 2:
+				position, length = relativeX+relativeY, width+height
+			case 3:
+				position, length = width-relativeX+relativeY, width+height
+			}
+			fraction := position * 255 / length
+			inverse := 255 - fraction
+			pixelIndex := canvas.PixOffset(x, y)
+			canvas.Pix[pixelIndex] = uint8((int(startColor.R)*inverse + int(endColor.R)*fraction) / 255)
+			canvas.Pix[pixelIndex+1] = uint8((int(startColor.G)*inverse + int(endColor.G)*fraction) / 255)
+			canvas.Pix[pixelIndex+2] = uint8((int(startColor.B)*inverse + int(endColor.B)*fraction) / 255)
+			canvas.Pix[pixelIndex+3] = 255
+		}
+	}
+}
+
+// drawLoginCaptchaBottomMarks 在渐变底图上随机绘制雪花和五星；调用顺序保证它们位于引导线和所有字符下方。
+func drawLoginCaptchaBottomMarks(canvas *image.NRGBA, random *captchaImageRandom) {
+	for index := range loginCaptchaBottomSnowflakeCount + loginCaptchaBottomStarCount {
+		markColor := random.color(loginCaptchaGuideLineColors)
+		radius := 2 + random.intn(3)
+		centerX := radius + random.intn(loginCaptchaImageWidth-radius*2)
+		centerY := radius + random.intn(loginCaptchaImageHeight-radius*2)
+		if index < loginCaptchaBottomSnowflakeCount {
+			drawLoginCaptchaSnowflake(canvas, centerX, centerY, radius, markColor)
+			continue
+		}
+		drawLoginCaptchaStar(canvas, centerX, centerY, radius+1, markColor)
+	}
 }
 
 // drawLoginCaptchaBaseFrame 绘制包含全部字符的静态检查帧，供边界测试确认文字不会被图片裁切。
@@ -222,7 +369,6 @@ func drawLoginCaptchaBaseFrame(code string) (*image.NRGBA, error) {
 	if err = drawLoginCaptchaText(canvas, strings.TrimSpace(code), &textRandom, 0, -1); err != nil {
 		return nil, errors.Tag(err)
 	}
-	drawLoginCaptchaForegroundSnowflakes(canvas, &textRandom)
 	drawLoginCaptchaForegroundCurves(canvas, &textRandom)
 	return canvas, nil
 }
@@ -247,41 +393,161 @@ func (r *captchaImageRandom) offset(limit int) int {
 	return r.intn(limit*2+1) - limit
 }
 
-// drawLoginCaptchaGuideLines 绘制淡背景线，提供轻量干扰但不覆盖最终文字。
+// drawLoginCaptchaGuideLines 绘制 3 条随机振幅、波长和相位的淡色正弦波，禁止使用斜直线代替波形。
 func drawLoginCaptchaGuideLines(canvas *image.NRGBA, random *captchaImageRandom) {
 	for range loginCaptchaGuideLineCount {
 		lineColor := random.color(loginCaptchaGuideLineColors)
-		startOffset := random.intn(loginCaptchaImageHeight - 16)
-		endOffset := random.intn(loginCaptchaImageHeight - 16)
-		drawLoginCaptchaLine(canvas, 4, 8+startOffset, loginCaptchaImageWidth-5, 8+endOffset, lineColor)
+		baseY := 6 + random.intn(loginCaptchaImageHeight-12)
+		amplitude := 2 + random.intn(4)
+		wavelength := 24 + random.intn(25)
+		phase := float64(random.intn(360)) * math.Pi / 180
+		drawLoginCaptchaGuideWave(canvas, baseY, amplitude, wavelength, phase, lineColor)
 	}
 }
 
-// drawLoginCaptchaNoiseMarks 在文字下方绘制五星和圆点；雪花由前景函数按字符槽位单独覆盖。
-func drawLoginCaptchaNoiseMarks(canvas *image.NRGBA, random *captchaImageRandom) {
-	for range loginCaptchaNoiseMarkCount - loginCaptchaSnowflakeCount {
-		markColor := random.color(loginCaptchaNoiseMarkColors)
-		centerX := loginCaptchaPaddingX + random.intn(loginCaptchaImageWidth-loginCaptchaPaddingX*2)
-		centerY := 6 + random.intn(loginCaptchaImageHeight-12)
-		radius := random.intn(3)
-		if random.intn(2) == 0 {
-			drawLoginCaptchaStar(canvas, centerX, centerY, radius+3, markColor)
-		} else {
-			drawLoginCaptchaDot(canvas, centerX, centerY, radius+1, markColor)
+// drawLoginCaptchaGuideWave 在图片全宽绘制单条正弦波；振幅必须大于零，保证轨迹出现波峰和波谷。
+func drawLoginCaptchaGuideWave(canvas *image.NRGBA, baseY int, amplitude int, wavelength int, phase float64, lineColor color.RGBA) {
+	previousY := baseY + int(math.Round(float64(amplitude)*math.Sin(phase)))
+	for x := 1; x < loginCaptchaImageWidth; x++ {
+		angle := float64(x)*2*math.Pi/float64(wavelength) + phase
+		currentY := baseY + int(math.Round(float64(amplitude)*math.Sin(angle)))
+		drawLoginCaptchaLine(canvas, x-1, previousY, x, currentY, lineColor)
+		previousY = currentY
+	}
+}
+
+// drawLoginCaptchaBackgroundCharacters 使用两个随机相位低差异序列覆盖图片宽高，并通过字形碰撞检查避免形成固定行或局部重叠。
+func drawLoginCaptchaBackgroundCharacters(canvas *image.NRGBA, random *captchaImageRandom) error {
+	context := freetype.NewContext()
+	context.SetDPI(loginCaptchaDPI)
+	context.SetClip(canvas.Bounds())
+	context.SetDst(canvas)
+	context.SetFont(loginCaptchaFont)
+	context.SetFontSize(loginCaptchaBackgroundCharacterFontSize)
+	context.SetHinting(font.HintingFull)
+
+	face := truetype.NewFace(loginCaptchaFont, &truetype.Options{
+		DPI:     loginCaptchaDPI,
+		Hinting: font.HintingFull,
+		Size:    loginCaptchaBackgroundCharacterFontSize,
+	})
+	defer face.Close()
+	drawer := font.Drawer{Face: face}
+	bounds := canvas.Bounds()
+	horizontalPhase := float64(random.intn(1000)) / 1000
+	verticalPhase := float64(random.intn(1000)) / 1000
+	occupied := make([]image.Rectangle, 0, loginCaptchaBackgroundCharacterCount)
+
+	for index := range loginCaptchaBackgroundCharacterCount {
+		character := string(loginCaptchaBackgroundCharacterSet[random.intn(len(loginCaptchaBackgroundCharacterSet))])
+		characterColor := random.color(loginCaptchaBackgroundCharacterColors)
+		x, y, inkBounds := loginCaptchaBackgroundPosition(
+			&drawer,
+			character,
+			index,
+			horizontalPhase,
+			verticalPhase,
+			bounds,
+			occupied,
+		)
+		occupied = append(occupied, inkBounds)
+		context.SetSrc(image.NewUniform(characterColor))
+		if _, err := context.DrawString(character, freetype.Pt(x, y)); err != nil {
+			return errors.Wrap(err, "绘制登录验证码背景字符失败")
 		}
 	}
+	return nil
 }
 
-// drawLoginCaptchaForegroundSnowflakes 按字符槽位覆盖雪花，使每个字符区域都有前景干扰且不会集中成块。
-func drawLoginCaptchaForegroundSnowflakes(canvas *image.NRGBA, random *captchaImageRandom) {
-	cellWidth := (loginCaptchaImageWidth - loginCaptchaPaddingX*2) / loginCaptchaSnowflakeCount
-	for index := range loginCaptchaSnowflakeCount {
-		markColor := random.color(loginCaptchaForegroundCurveColors)
-		centerX := loginCaptchaPaddingX + index*cellWidth + cellWidth/2 + random.offset(cellWidth/4)
-		centerY := loginCaptchaImageHeight/2 + random.offset(7)
-		radius := 3 + random.intn(3)
-		drawLoginCaptchaSnowflake(canvas, centerX, centerY, radius, markColor)
+// loginCaptchaBackgroundPosition 为单个背景字符选择图片范围内与既有字形重叠面积最小的位置；不预留边距，允许字形贴边。
+func loginCaptchaBackgroundPosition(
+	drawer *font.Drawer,
+	character string,
+	index int,
+	horizontalPhase float64,
+	verticalPhase float64,
+	imageBounds image.Rectangle,
+	occupied []image.Rectangle,
+) (int, int, image.Rectangle) {
+	const (
+		candidateStep        = 0.4142135623730951
+		goldenRatioConjugate = 0.6180339887498949
+	)
+	glyphBounds, _ := drawer.BoundString(character)
+	glyphMinX := glyphBounds.Min.X.Floor()
+	glyphMaxX := glyphBounds.Max.X.Ceil()
+	glyphMinY := glyphBounds.Min.Y.Floor()
+	glyphMaxY := glyphBounds.Max.Y.Ceil()
+	minX := imageBounds.Min.X - glyphMinX
+	maxX := imageBounds.Max.X - glyphMaxX
+	minY := imageBounds.Min.Y - glyphMinY
+	maxY := imageBounds.Max.Y - glyphMaxY
+	bestOverlap := int(^uint(0) >> 1)
+	bestX, bestY := 0, minY
+	bestBounds := image.Rectangle{}
+	for attempt := range loginCaptchaBackgroundPlacementAttempts {
+		// 横向使用二进制反序列、纵向使用黄金比例序列，避免两个坐标按相近步长退化成少量对角轨迹。
+		horizontalPosition := math.Mod(horizontalPhase+float64(index)*0.7548776662466927+loginCaptchaBinaryRadicalInverse(attempt), 1)
+		x := minX + int(math.Round(horizontalPosition*float64(maxX-minX)))
+		candidateIndex := index + attempt
+		verticalPosition := math.Mod(verticalPhase+float64(candidateIndex)*goldenRatioConjugate, 1)
+		verticalJitter := math.Mod(verticalPhase+float64(candidateIndex)*candidateStep, 1)
+		verticalOffset := int(math.Round((verticalJitter*2 - 1) * float64(loginCaptchaBackgroundCharacterVerticalJitter)))
+		y := clampInt(minY+int(math.Round(verticalPosition*float64(maxY-minY)))+verticalOffset, minY, maxY)
+		inkBounds := image.Rect(x+glyphMinX, y+glyphMinY, x+glyphMaxX, y+glyphMaxY)
+		overlap := loginCaptchaBackgroundOverlapArea(inkBounds, occupied)
+		if overlap < bestOverlap {
+			bestOverlap, bestX, bestY, bestBounds = overlap, x, y, inkBounds
+		}
+		if overlap == 0 {
+			return bestX, bestY, bestBounds
+		}
 	}
+
+	// 低差异候选仍重叠时才扫描剩余像素位置，避免最宽字符组合存在空位却因抽样未命中而重叠。
+	horizontalCount := maxX - minX + 1
+	verticalCount := maxY - minY + 1
+	horizontalStart := int(math.Floor(horizontalPhase * float64(horizontalCount)))
+	verticalStart := int(math.Floor(verticalPhase * float64(verticalCount)))
+	for verticalOffset := range verticalCount {
+		y := minY + (verticalStart+verticalOffset)%verticalCount
+		for horizontalOffset := range horizontalCount {
+			x := minX + (horizontalStart+horizontalOffset)%horizontalCount
+			inkBounds := image.Rect(x+glyphMinX, y+glyphMinY, x+glyphMaxX, y+glyphMaxY)
+			overlap := loginCaptchaBackgroundOverlapArea(inkBounds, occupied)
+			if overlap < bestOverlap {
+				bestOverlap, bestX, bestY, bestBounds = overlap, x, y, inkBounds
+			}
+			if overlap == 0 {
+				return bestX, bestY, bestBounds
+			}
+		}
+	}
+	return bestX, bestY, bestBounds
+}
+
+// loginCaptchaBinaryRadicalInverse 将连续候选序号映射为均匀覆盖 [0,1) 的二进制反序列，供横向候选搜索使用。
+func loginCaptchaBinaryRadicalInverse(value int) float64 {
+	position := 0.0
+	weight := 0.5
+	for value > 0 {
+		position += float64(value&1) * weight
+		value >>= 1
+		weight *= 0.5
+	}
+	return position
+}
+
+// loginCaptchaBackgroundOverlapArea 计算候选字形与既有字形的总交叠面积；边界相邻不算重叠，不强制预留字符间距。
+func loginCaptchaBackgroundOverlapArea(candidate image.Rectangle, occupied []image.Rectangle) int {
+	total := 0
+	for _, current := range occupied {
+		intersection := candidate.Intersect(current)
+		if !intersection.Empty() {
+			total += intersection.Dx() * intersection.Dy()
+		}
+	}
+	return total
 }
 
 // drawLoginCaptchaForegroundCurves 在文字上方绘制多色正弦曲线，破坏纯色字符连通区域但保留人工可辨识轮廓。
@@ -339,17 +605,20 @@ func drawLoginCaptchaRainbowBand(canvas *image.NRGBA, left int, frameIndex int, 
 	}
 }
 
-// drawLoginCaptchaHorizontalRainbowLine 绘制横跨图片的单像素彩虹正弦线；线条逐帧上下摆动并覆盖经过的字符像素。
-func drawLoginCaptchaHorizontalRainbowLine(canvas *image.NRGBA, frameIndex int) {
-	framePhase := float64(frameIndex) * 2 * math.Pi / float64(loginCaptchaAnimationFrameCount)
-	centerY := loginCaptchaImageHeight/2 + int(math.Round(float64(loginCaptchaHorizontalSweepAmplitude)*math.Sin(framePhase)))
-	previousY := centerY
-	for x := 1; x < loginCaptchaImageWidth; x++ {
-		wavePhase := float64(x)*4*math.Pi/float64(loginCaptchaImageWidth) + framePhase
-		currentY := centerY + int(math.Round(float64(loginCaptchaHorizontalWaveAmplitude)*math.Sin(wavePhase)))
-		lineColor := loginCaptchaRainbowColors[(frameIndex+x/10)%len(loginCaptchaRainbowColors)]
-		drawLoginCaptchaLine(canvas, x-1, previousY, x, currentY, lineColor)
-		previousY = currentY
+// drawLoginCaptchaHorizontalRainbowLines 绘制 3 条不同相位的横向彩虹正弦线；线条逐帧摆动并短暂覆盖经过的字符像素。
+func drawLoginCaptchaHorizontalRainbowLines(canvas *image.NRGBA, frameIndex int) {
+	for lineIndex := range loginCaptchaHorizontalRainbowLineCount {
+		framePhase := float64(frameIndex)*2*math.Pi/float64(loginCaptchaAnimationFrameCount) + float64(lineIndex)*2*math.Pi/float64(loginCaptchaHorizontalRainbowLineCount)
+		centerOffset := (lineIndex - loginCaptchaHorizontalRainbowLineCount/2) * loginCaptchaHorizontalRainbowLineSpacing
+		centerY := loginCaptchaImageHeight/2 + centerOffset + int(math.Round(float64(loginCaptchaHorizontalSweepAmplitude)*math.Sin(framePhase)))
+		previousY := centerY
+		for x := 1; x < loginCaptchaImageWidth; x++ {
+			wavePhase := float64(x)*4*math.Pi/float64(loginCaptchaImageWidth) + framePhase + float64(lineIndex)*math.Pi/3
+			currentY := centerY + int(math.Round(float64(loginCaptchaHorizontalWaveAmplitude)*math.Sin(wavePhase)))
+			lineColor := loginCaptchaRainbowColors[(frameIndex+lineIndex*3+x/10)%len(loginCaptchaRainbowColors)]
+			drawLoginCaptchaLine(canvas, x-1, previousY, x, currentY, lineColor)
+			previousY = currentY
+		}
 	}
 }
 
@@ -391,35 +660,7 @@ func blendLoginCaptchaPixel(canvas *image.NRGBA, x int, y int, overlay color.RGB
 	})
 }
 
-// drawLoginCaptchaSnowflake 绘制轻量雪花噪声。
-func drawLoginCaptchaSnowflake(canvas *image.NRGBA, centerX int, centerY int, radius int, markColor color.RGBA) {
-	drawLoginCaptchaLine(canvas, centerX-radius, centerY, centerX+radius, centerY, markColor)
-	drawLoginCaptchaLine(canvas, centerX, centerY-radius, centerX, centerY+radius, markColor)
-	drawLoginCaptchaLine(canvas, centerX-radius+1, centerY-radius+1, centerX+radius-1, centerY+radius-1, markColor)
-	drawLoginCaptchaLine(canvas, centerX-radius+1, centerY+radius-1, centerX+radius-1, centerY-radius+1, markColor)
-}
-
-// drawLoginCaptchaStar 绘制轻量五星噪声。
-func drawLoginCaptchaStar(canvas *image.NRGBA, centerX int, centerY int, radius int, markColor color.RGBA) {
-	drawLoginCaptchaLine(canvas, centerX, centerY-radius, centerX+radius, centerY+radius-1, markColor)
-	drawLoginCaptchaLine(canvas, centerX+radius, centerY+radius-1, centerX-radius, centerY-1, markColor)
-	drawLoginCaptchaLine(canvas, centerX-radius, centerY-1, centerX+radius, centerY-1, markColor)
-	drawLoginCaptchaLine(canvas, centerX+radius, centerY-1, centerX-radius, centerY+radius-1, markColor)
-	drawLoginCaptchaLine(canvas, centerX-radius, centerY+radius-1, centerX, centerY-radius, markColor)
-}
-
-// drawLoginCaptchaDot 绘制小圆点噪声。
-func drawLoginCaptchaDot(canvas *image.NRGBA, centerX int, centerY int, radius int, markColor color.RGBA) {
-	for y := centerY - radius; y <= centerY+radius; y++ {
-		for x := centerX - radius; x <= centerX+radius; x++ {
-			if (x-centerX)*(x-centerX)+(y-centerY)*(y-centerY) <= radius*radius && image.Pt(x, y).In(canvas.Bounds()) {
-				canvas.Set(x, y, markColor)
-			}
-		}
-	}
-}
-
-// loginCaptchaHiddenCharacterIndex 返回当前帧隐藏的字符位置；12 帧按每 3 帧一组从左到右覆盖 4 个字符。
+// loginCaptchaHiddenCharacterIndex 返回当前帧隐藏的字符位置；8 帧按每 2 帧一组从左到右覆盖 4 个字符。
 func loginCaptchaHiddenCharacterIndex(frameIndex int, characterCount int) int {
 	if characterCount <= 0 {
 		return -1
@@ -427,7 +668,7 @@ func loginCaptchaHiddenCharacterIndex(frameIndex int, characterCount int) int {
 	return frameIndex * characterCount / loginCaptchaAnimationFrameCount % characterCount
 }
 
-// drawLoginCaptchaText 按字符槽位绘制文本；各字符错相位跳动，hiddenCharacterIndex 所指字符保留空白。
+// drawLoginCaptchaText 按字符槽位绘制文本；各字符错相位跳动和偏转，hiddenCharacterIndex 所指字符保留空白。
 func drawLoginCaptchaText(canvas *image.NRGBA, code string, random *captchaImageRandom, frameIndex int, hiddenCharacterIndex int) error {
 	runes := []rune(code)
 	if len(runes) == 0 {
@@ -435,8 +676,6 @@ func drawLoginCaptchaText(canvas *image.NRGBA, code string, random *captchaImage
 	}
 	context := freetype.NewContext()
 	context.SetDPI(loginCaptchaDPI)
-	context.SetClip(canvas.Bounds())
-	context.SetDst(canvas)
 	context.SetFont(loginCaptchaFont)
 	context.SetFontSize(loginCaptchaFontSize)
 	context.SetHinting(font.HintingFull)
@@ -459,6 +698,7 @@ func drawLoginCaptchaText(canvas *image.NRGBA, code string, random *captchaImage
 		textColor := random.color(loginCaptchaTextColors)
 		offsetX := random.offset(2)
 		offsetY := random.offset(1)
+		baseTilt := random.offset(loginCaptchaCharacterBaseTiltDegrees)
 		jumpPhase := float64(frameIndex)*2*math.Pi/float64(loginCaptchaAnimationFrameCount) + float64(index)*math.Pi/2
 		jumpY := int(math.Round(float64(loginCaptchaCharacterJumpAmplitude) * math.Sin(jumpPhase)))
 		text := string(char)
@@ -469,12 +709,87 @@ func drawLoginCaptchaText(canvas *image.NRGBA, code string, random *captchaImage
 		if index == hiddenCharacterIndex {
 			continue
 		}
+		glyphLeft := loginCaptchaPaddingX + index*cellWidth - loginCaptchaCharacterGlyphPadding
+		glyph := image.NewNRGBA(image.Rect(0, 0, cellWidth+loginCaptchaCharacterGlyphPadding*2, loginCaptchaImageHeight))
+		context.SetClip(glyph.Bounds())
+		context.SetDst(glyph)
 		context.SetSrc(image.NewUniform(textColor))
-		if _, err := context.DrawString(text, freetype.Pt(x, y)); err != nil {
+		if _, err := context.DrawString(text, freetype.Pt(x-glyphLeft, y)); err != nil {
 			return errors.Wrap(err, "绘制登录验证码文字失败")
 		}
+		tilt := loginCaptchaCharacterTilt(baseTilt, frameIndex, index)
+		drawLoginCaptchaRotatedGlyph(canvas, glyph, glyphLeft, tilt)
 	}
 	return nil
+}
+
+// loginCaptchaCharacterTilt 计算主字符当前帧偏角；基础随机角保持不变，三度摆动按字符错相位推进。
+func loginCaptchaCharacterTilt(baseTilt int, frameIndex int, characterIndex int) float64 {
+	phase := float64(frameIndex)*2*math.Pi/float64(loginCaptchaAnimationFrameCount) + float64(characterIndex)*math.Pi/2
+	return float64(baseTilt) + float64(loginCaptchaCharacterTiltSwingDegrees)*math.Sin(phase)
+}
+
+// drawLoginCaptchaRotatedGlyph 以字符槽位中心逆向采样旋转后的像素，并按 alpha 覆盖到不透明 GIF 帧底图。
+func drawLoginCaptchaRotatedGlyph(canvas *image.NRGBA, glyph *image.NRGBA, targetLeft int, angleDegrees float64) {
+	angle := angleDegrees * math.Pi / 180
+	cosine := math.Cos(angle)
+	sine := math.Sin(angle)
+	bounds := glyph.Bounds()
+	centerX := float64(bounds.Min.X+bounds.Max.X-1) / 2
+	centerY := float64(bounds.Min.Y+bounds.Max.Y-1) / 2
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			deltaX := float64(x) - centerX
+			deltaY := float64(y) - centerY
+			sourceX := int(math.Round(cosine*deltaX + sine*deltaY + centerX))
+			sourceY := int(math.Round(-sine*deltaX + cosine*deltaY + centerY))
+			if !image.Pt(sourceX, sourceY).In(bounds) {
+				continue
+			}
+			source := glyph.NRGBAAt(sourceX, sourceY)
+			if source.A == 0 {
+				continue
+			}
+			blendLoginCaptchaGlyphPixel(canvas, targetLeft+x, y, source)
+		}
+	}
+}
+
+// blendLoginCaptchaGlyphPixel 把带抗锯齿 alpha 的字符像素合成到验证码底图，越界笔画由图片边界裁剪。
+func blendLoginCaptchaGlyphPixel(canvas *image.NRGBA, x int, y int, source color.NRGBA) {
+	if !image.Pt(x, y).In(canvas.Bounds()) {
+		return
+	}
+	if source.A == 255 {
+		canvas.SetNRGBA(x, y, source)
+		return
+	}
+	destination := canvas.NRGBAAt(x, y)
+	sourceWeight := int(source.A)
+	destinationWeight := 255 - sourceWeight
+	canvas.SetNRGBA(x, y, color.NRGBA{
+		R: uint8((int(source.R)*sourceWeight + int(destination.R)*destinationWeight) / 255),
+		G: uint8((int(source.G)*sourceWeight + int(destination.G)*destinationWeight) / 255),
+		B: uint8((int(source.B)*sourceWeight + int(destination.B)*destinationWeight) / 255),
+		A: 255,
+	})
+}
+
+// drawLoginCaptchaSnowflake 绘制最底层浅色雪花。
+func drawLoginCaptchaSnowflake(canvas *image.NRGBA, centerX int, centerY int, radius int, markColor color.RGBA) {
+	drawLoginCaptchaLine(canvas, centerX-radius, centerY, centerX+radius, centerY, markColor)
+	drawLoginCaptchaLine(canvas, centerX, centerY-radius, centerX, centerY+radius, markColor)
+	drawLoginCaptchaLine(canvas, centerX-radius+1, centerY-radius+1, centerX+radius-1, centerY+radius-1, markColor)
+	drawLoginCaptchaLine(canvas, centerX-radius+1, centerY+radius-1, centerX+radius-1, centerY-radius+1, markColor)
+}
+
+// drawLoginCaptchaStar 绘制最底层浅色五星。
+func drawLoginCaptchaStar(canvas *image.NRGBA, centerX int, centerY int, radius int, markColor color.RGBA) {
+	drawLoginCaptchaLine(canvas, centerX, centerY-radius, centerX+radius, centerY+radius-1, markColor)
+	drawLoginCaptchaLine(canvas, centerX+radius, centerY+radius-1, centerX-radius, centerY-1, markColor)
+	drawLoginCaptchaLine(canvas, centerX-radius, centerY-1, centerX+radius, centerY-1, markColor)
+	drawLoginCaptchaLine(canvas, centerX+radius, centerY-1, centerX-radius, centerY+radius-1, markColor)
+	drawLoginCaptchaLine(canvas, centerX-radius, centerY+radius-1, centerX, centerY-radius, markColor)
 }
 
 // drawLoginCaptchaLine 使用 Bresenham 算法绘制单像素线。

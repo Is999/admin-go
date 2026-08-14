@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"image/png"
+	"image"
+	"image/color"
+	"image/gif"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -45,22 +48,33 @@ func TestBuildLoginCaptchaAndVerify(t *testing.T) {
 		t.Fatalf("BuildLoginCaptcha() returned empty key or image: %#v", data)
 	}
 	parts := strings.SplitN(data.Image, ",", 2)
-	if len(parts) != 2 || parts[0] != "data:image/png;base64" {
-		t.Fatalf("验证码图片必须是 PNG data URL，实际前缀为 %q", parts[0])
+	if len(parts) != 2 || parts[0] != "data:image/gif;base64" {
+		t.Fatalf("验证码图片必须是 GIF data URL，实际前缀为 %q", parts[0])
 	}
 	imageBytes, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
-		t.Fatalf("解码验证码 PNG 失败: %v", err)
+		t.Fatalf("解码验证码 GIF 失败: %v", err)
 	}
-	if contentType := http.DetectContentType(imageBytes); contentType != "image/png" {
-		t.Fatalf("验证码图片类型=%q，期望 image/png", contentType)
+	if contentType := http.DetectContentType(imageBytes); contentType != "image/gif" {
+		t.Fatalf("验证码图片类型=%q，期望 image/gif", contentType)
 	}
-	config, err := png.DecodeConfig(bytes.NewReader(imageBytes))
+	animation, err := gif.DecodeAll(bytes.NewReader(imageBytes))
 	if err != nil {
-		t.Fatalf("读取验证码 PNG 尺寸失败: %v", err)
+		t.Fatalf("读取验证码 GIF 帧失败: %v", err)
 	}
-	if config.Width != loginCaptchaImageWidth || config.Height != loginCaptchaImageHeight {
-		t.Fatalf("验证码图片尺寸=%dx%d，期望 %dx%d", config.Width, config.Height, loginCaptchaImageWidth, loginCaptchaImageHeight)
+	if animation.Config.Width != loginCaptchaImageWidth || animation.Config.Height != loginCaptchaImageHeight {
+		t.Fatalf("验证码图片尺寸=%dx%d，期望 %dx%d", animation.Config.Width, animation.Config.Height, loginCaptchaImageWidth, loginCaptchaImageHeight)
+	}
+	if len(animation.Image) != loginCaptchaAnimationFrameCount || len(animation.Delay) != loginCaptchaAnimationFrameCount {
+		t.Fatalf("验证码 GIF 帧数 image=%d delay=%d，期望 %d", len(animation.Image), len(animation.Delay), loginCaptchaAnimationFrameCount)
+	}
+	for frameIndex, delay := range animation.Delay {
+		if delay != loginCaptchaFrameDelayCentiseconds {
+			t.Fatalf("验证码 GIF 第 %d 帧延迟=%d，期望 %d 厘秒", frameIndex, delay, loginCaptchaFrameDelayCentiseconds)
+		}
+	}
+	if bytes.Equal(animation.Image[0].Pix, animation.Image[1].Pix) {
+		t.Fatal("验证码 GIF 相邻帧不应相同，彩虹波浪带必须发生移动")
 	}
 	if bytes.Contains(imageBytes, []byte("<text")) || bytes.Contains(imageBytes, []byte("<svg")) {
 		t.Fatal("验证码图片不应包含可直接解析的 SVG 明文节点")
@@ -95,16 +109,12 @@ func TestVerifyLoginCaptchaRejectsWrongCode(t *testing.T) {
 	}
 }
 
-// TestDrawLoginCaptchaPNGKeepsTextInsideImage 验证宽字符不会贴边裁切。
-func TestDrawLoginCaptchaPNGKeepsTextInsideImage(t *testing.T) {
+// TestDrawLoginCaptchaBaseFrameKeepsTextInsideImage 验证宽字符在动态图片的基础帧内不会贴边裁切。
+func TestDrawLoginCaptchaBaseFrameKeepsTextInsideImage(t *testing.T) {
 	for range 20 {
-		imageBytes, err := drawLoginCaptchaPNG("WMWM")
+		captchaImage, err := drawLoginCaptchaBaseFrame("WMWM")
 		if err != nil {
-			t.Fatalf("drawLoginCaptchaPNG() error = %v", err)
-		}
-		captchaImage, err := png.Decode(bytes.NewReader(imageBytes))
-		if err != nil {
-			t.Fatalf("解码验证码 PNG 失败: %v", err)
+			t.Fatalf("drawLoginCaptchaBaseFrame() error = %v", err)
 		}
 		bounds := captchaImage.Bounds()
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -119,6 +129,143 @@ func TestDrawLoginCaptchaPNGKeepsTextInsideImage(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestDrawLoginCaptchaRainbowBandUsesOpaqueMovingLines 验证实体线覆盖当前像素且随波浪带移出后不再残留。
+func TestDrawLoginCaptchaRainbowBandUsesOpaqueMovingLines(t *testing.T) {
+	background := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
+	for y := 0; y < loginCaptchaImageHeight; y++ {
+		for x := 0; x < loginCaptchaImageWidth; x++ {
+			canvas.SetNRGBA(x, y, background)
+		}
+	}
+
+	const (
+		left       = 10
+		frameIndex = 0
+		bandIndex  = 0
+		y          = loginCaptchaImageHeight / 2
+	)
+	drawLoginCaptchaRainbowBand(canvas, left, frameIndex, bandIndex, loginCaptchaRainbowPrimaryAlpha)
+	slant := math.Tan(float64(loginCaptchaRainbowSlantDegrees) * math.Pi / 180)
+	wave := int(math.Round(float64(loginCaptchaRainbowWaveAmplitude) * math.Sin(float64(y)*4*math.Pi/float64(loginCaptchaImageHeight))))
+	slantOffset := int(math.Round(float64(y-loginCaptchaImageHeight/2) * slant))
+	startX := left + wave + slantOffset
+	for lineIndex := range loginCaptchaRainbowSolidLineCount {
+		lineX := startX + (lineIndex+1)*loginCaptchaRainbowBandWidth/(loginCaptchaRainbowSolidLineCount+1)
+		expected := loginCaptchaRainbowColors[(frameIndex+bandIndex*3+lineIndex*3+y/12)%len(loginCaptchaRainbowColors)]
+		if actual := canvas.NRGBAAt(lineX, y); actual != color.NRGBAModel.Convert(expected).(color.NRGBA) {
+			t.Fatalf("第 %d 条实体线像素=%#v，期望完全不透明颜色 %#v", lineIndex, actual, expected)
+		}
+	}
+
+	revealed := image.NewNRGBA(canvas.Bounds())
+	for y := 0; y < loginCaptchaImageHeight; y++ {
+		for x := 0; x < loginCaptchaImageWidth; x++ {
+			revealed.SetNRGBA(x, y, background)
+		}
+	}
+	drawLoginCaptchaRainbowBand(revealed, -loginCaptchaImageWidth, frameIndex, bandIndex, loginCaptchaRainbowPrimaryAlpha)
+	if actual := revealed.NRGBAAt(startX, y); actual != background {
+		t.Fatalf("波浪带移开后像素=%#v，期望恢复原始背景 %#v", actual, background)
+	}
+}
+
+// TestDrawLoginCaptchaHorizontalRainbowLineMoves 验证横向彩虹线逐帧改变位置且使用完全不透明像素。
+func TestDrawLoginCaptchaHorizontalRainbowLineMoves(t *testing.T) {
+	newCanvas := func() *image.NRGBA {
+		canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
+		for y := 0; y < loginCaptchaImageHeight; y++ {
+			for x := 0; x < loginCaptchaImageWidth; x++ {
+				canvas.SetNRGBA(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+			}
+		}
+		return canvas
+	}
+	first := newCanvas()
+	second := newCanvas()
+	drawLoginCaptchaHorizontalRainbowLine(first, 0)
+	drawLoginCaptchaHorizontalRainbowLine(second, loginCaptchaAnimationFrameCount/4)
+	if bytes.Equal(first.Pix, second.Pix) {
+		t.Fatal("横向彩虹线在四分之一周期后必须改变位置")
+	}
+	for _, canvas := range []*image.NRGBA{first, second} {
+		foundOpaqueColor := false
+		for pixelIndex := 0; pixelIndex < len(canvas.Pix); pixelIndex += 4 {
+			if canvas.Pix[pixelIndex] == 255 && canvas.Pix[pixelIndex+1] == 255 && canvas.Pix[pixelIndex+2] == 255 {
+				continue
+			}
+			if canvas.Pix[pixelIndex+3] != 255 {
+				t.Fatalf("横向彩虹线像素 alpha=%d，期望 255", canvas.Pix[pixelIndex+3])
+			}
+			foundOpaqueColor = true
+		}
+		if !foundOpaqueColor {
+			t.Fatal("横向彩虹线未绘制任何彩色像素")
+		}
+	}
+}
+
+// TestLoginCaptchaCharactersHideLeftToRightAndJump 验证每 3 帧只隐藏一个字符，隐藏位置从左到右推进且字符轨迹发生跳动。
+func TestLoginCaptchaCharactersHideLeftToRightAndJump(t *testing.T) {
+	const code = "1234"
+	random := captchaImageRandom{}
+	render := func(frameIndex int, hiddenCharacterIndex int) *image.NRGBA {
+		canvas := image.NewNRGBA(image.Rect(0, 0, loginCaptchaImageWidth, loginCaptchaImageHeight))
+		for y := 0; y < loginCaptchaImageHeight; y++ {
+			for x := 0; x < loginCaptchaImageWidth; x++ {
+				canvas.SetNRGBA(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+			}
+		}
+		frameRandom := random
+		if err := drawLoginCaptchaText(canvas, code, &frameRandom, frameIndex, hiddenCharacterIndex); err != nil {
+			t.Fatalf("drawLoginCaptchaText(frame=%d hidden=%d) error = %v", frameIndex, hiddenCharacterIndex, err)
+		}
+		return canvas
+	}
+	cellWidth := (loginCaptchaImageWidth - loginCaptchaPaddingX*2) / len([]rune(code))
+	for frameIndex := range loginCaptchaAnimationFrameCount {
+		hiddenIndex := loginCaptchaHiddenCharacterIndex(frameIndex, len([]rune(code)))
+		expectedHiddenIndex := frameIndex / (loginCaptchaAnimationFrameCount / len([]rune(code)))
+		if hiddenIndex != expectedHiddenIndex {
+			t.Fatalf("第 %d 帧隐藏字符=%d，期望从左到右推进到 %d", frameIndex, hiddenIndex, expectedHiddenIndex)
+		}
+		allVisible := render(frameIndex, -1)
+		oneHidden := render(frameIndex, hiddenIndex)
+		for characterIndex := range len([]rune(code)) {
+			startX := loginCaptchaPaddingX + characterIndex*cellWidth
+			endX := startX + cellWidth
+			allVisiblePixels := countLoginCaptchaDarkPixels(allVisible, startX, endX)
+			hiddenPixels := countLoginCaptchaDarkPixels(oneHidden, startX, endX)
+			if characterIndex == hiddenIndex {
+				if allVisiblePixels == 0 || hiddenPixels != 0 {
+					t.Fatalf("第 %d 帧字符 %d 隐藏像素=%d，完整像素=%d", frameIndex, characterIndex, hiddenPixels, allVisiblePixels)
+				}
+				continue
+			}
+			if hiddenPixels != allVisiblePixels {
+				t.Fatalf("第 %d 帧误改非目标字符 %d：隐藏帧像素=%d，完整帧像素=%d", frameIndex, characterIndex, hiddenPixels, allVisiblePixels)
+			}
+		}
+	}
+	if bytes.Equal(render(0, -1).Pix, render(loginCaptchaAnimationFrameCount/4, -1).Pix) {
+		t.Fatal("字符在四分之一周期后必须改变纵向位置")
+	}
+}
+
+// countLoginCaptchaDarkPixels 统计指定字符槽位内的深色文字像素。
+func countLoginCaptchaDarkPixels(canvas *image.NRGBA, startX int, endX int) int {
+	count := 0
+	for y := 0; y < loginCaptchaImageHeight; y++ {
+		for x := startX; x < endX; x++ {
+			red, green, blue, _ := canvas.At(x, y).RGBA()
+			if isLoginCaptchaTextPixel(red, green, blue) {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // isLoginCaptchaTextPixel 判断像素是否属于深色文字区域。

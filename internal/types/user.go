@@ -14,6 +14,8 @@ const (
 	userPasswordMaxLength = 64
 	// userShardNoMod 表示用户 ID 哈希分片上限，与 idgen.ShardMod 保持一致。
 	userShardNoMod = 1024
+	// userListMaxPageSize 对齐用户列表分页器的最大档位；身份目录采用有界游标查询，单次最多额外读取一行判断后续页。
+	userListMaxPageSize = 200
 )
 
 // UserListReq 表示业务用户列表查询请求。
@@ -56,7 +58,8 @@ func (r *UserListReq) Validate() error {
 	if err := r.GetOrderReq.Validate(); err != nil {
 		return errors.Tag(err)
 	}
-	return r.GetPageReq.Validate()
+	r.Page, r.PageSize = normalizePageWithMax(r.Page, r.PageSize, defaultPageSize, userListMaxPageSize)
+	return nil
 }
 
 // CreateUserReq 表示后台新增前台用户请求。

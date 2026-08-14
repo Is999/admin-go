@@ -96,8 +96,8 @@ func TestValidateUserIdentityListReq(t *testing.T) {
 	}
 }
 
-// TestListByUserIdentityDoesNotLeakIdentityOrder 验证身份目录排序不会污染用户主表批量查询。
-func TestListByUserIdentityDoesNotLeakIdentityOrder(t *testing.T) {
+// TestListByUserIdentityUsesBoundedIdentityQuery 验证二百条列表只多读一行判断后续页，且身份目录排序不会污染用户表查询。
+func TestListByUserIdentityUsesBoundedIdentityQuery(t *testing.T) {
 	buffer := &bytes.Buffer{}
 	db := newUserLogicDryRunDB(t).Session(&gorm.Session{
 		Logger: logger.New(log.New(buffer, "", 0), logger.Config{LogLevel: logger.Info}),
@@ -128,17 +128,19 @@ func TestListByUserIdentityDoesNotLeakIdentityOrder(t *testing.T) {
 		},
 		GetPageReq: types.GetPageReq{
 			Page:     1,
-			PageSize: 20,
+			PageSize: 200,
 		},
 	})
 	if resp.IsFailure() {
 		t.Fatalf("用户列表查询失败: %+v", resp)
 	}
+	identityBounded := false
 	identityOrdered := false
 	userQueried := false
 	for _, line := range strings.Split(buffer.String(), "\n") {
 		if strings.Contains(line, "FROM `user_identity_username`") && strings.Contains(line, "ORDER BY user_id desc") {
 			identityOrdered = true
+			identityBounded = strings.Contains(line, "LIMIT 201")
 		}
 		if strings.Contains(line, "FROM `user` ") {
 			userQueried = true
@@ -147,8 +149,71 @@ func TestListByUserIdentityDoesNotLeakIdentityOrder(t *testing.T) {
 			}
 		}
 	}
-	if !identityOrdered || !userQueried {
-		t.Fatalf("用户列表 SQL 未完整覆盖身份目录排序和用户主表读取: %s", buffer.String())
+	if !identityBounded || !identityOrdered || !userQueried {
+		t.Fatalf("用户列表 SQL 未完整覆盖身份目录上限、排序和用户表读取: %s", buffer.String())
+	}
+}
+
+// TestListByUserIdentityKeepsTwoHundredRowPagination 验证一百零一条不会被旧上限截断，超过二百条时用占位总数开放下一页。
+func TestListByUserIdentityKeepsTwoHundredRowPagination(t *testing.T) {
+	tests := []struct {
+		name           string
+		rowCount       int
+		wantItems      int
+		wantTotal      int64
+		wantHasMore    bool
+		wantNextCursor bool
+	}{
+		{name: "一百零一条完整返回", rowCount: 101, wantItems: 101, wantTotal: 101},
+		{name: "二百零一条开放下一页", rowCount: 201, wantItems: 200, wantTotal: 201, wantHasMore: true, wantNextCursor: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newUserLogicDryRunDB(t)
+			identities := make([]model.UserIdentity, 0, tt.rowCount)
+			users := make([]model.User, 0, tt.wantItems)
+			for index := 1; index <= tt.rowCount; index++ {
+				userID := int64(index)
+				identities = append(identities, model.UserIdentity{IdentityValue: "demo", UserID: userID, UserShardNo: idgen.ShardNo(userID)})
+				if index <= tt.wantItems {
+					users = append(users, model.User{ID: userID, ShardNo: idgen.ShardNo(userID), Username: "demo"})
+				}
+			}
+			if err := db.Callback().Query().Before("gorm:query").Register("test:inject_user_pagination_rows", func(tx *gorm.DB) {
+				switch rows := tx.Statement.Dest.(type) {
+				case *[]model.UserIdentity:
+					*rows = identities
+				case *[]model.User:
+					*rows = users
+				}
+			}); err != nil {
+				t.Fatalf("注册用户分页测试查询回调失败: %v", err)
+			}
+			logicObj := NewLogicWithContext(context.Background(), svc.NewServiceContext(config.Config{}, svc.Dependencies{
+				SiteDBs: svc.SiteDatabases{MainDB: db},
+			}))
+			resp := logicObj.listByUserIdentity(db.Clauses(dbresolver.Read), &types.UserListReq{
+				GetOrderReq: types.GetOrderReq{Order: "asc"},
+				GetPageReq:  types.GetPageReq{Page: 1, PageSize: 200},
+			})
+			if resp.IsFailure() {
+				t.Fatalf("用户列表查询失败: %+v", resp)
+			}
+			data, ok := resp.Data.(types.ListResp[types.UserItem])
+			if !ok {
+				t.Fatalf("用户列表响应类型 = %T", resp.Data)
+			}
+			meta, ok := data.Meta.(types.UserListMeta)
+			if !ok {
+				t.Fatalf("用户列表分页元数据类型 = %T", data.Meta)
+			}
+			if len(data.List) != tt.wantItems || data.Total != tt.wantTotal || meta.HasMore != tt.wantHasMore {
+				t.Fatalf("用户列表分页 list=%d total=%d hasMore=%v", len(data.List), data.Total, meta.HasMore)
+			}
+			if (meta.NextCursorID > 0) != tt.wantNextCursor {
+				t.Fatalf("用户列表下一页游标 = %d, wantPresent=%v", meta.NextCursorID, tt.wantNextCursor)
+			}
+		})
 	}
 }
 
